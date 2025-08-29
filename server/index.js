@@ -20,28 +20,24 @@ webpush.setVapidDetails('mailto:ex@mail.com', VAPID_PUBLIC, VAPID_PRIVATE);
 const subscriptions = [];
 
 app.post('/subscribe', (req, res) => {
-  savedSubscription = req.body;
+  const sub = req.body;
+  subscriptions.push(sub);
   console.log('Subscription saved');
   res.sendStatus(201);
 });
 
 // Триггер отправки пуша фиксированного шаблона. Вызывать curl'ом.
 app.post('/send', async (req, res) => {
-  if (!savedSubscription) return res.status(400).send('No subscription saved');
-
   const payload = JSON.stringify({
-    title: 'Тестовое пуш-уведомление (сервер)',
-    body: `Шаблон: событие на сервере в ${new Date().toLocaleTimeString()}`,
-    // url: '/' // можно передать URL для открытия при клике
+    title: 'Событие на сервере',
+    body: `Шаблон: ${new Date().toLocaleTimeString()}`
   });
 
-  try {
-    await webpush.sendNotification(savedSubscription, payload);
-    res.send('OK');
-  } catch (err) {
-    console.error('Push error', err);
-    res.status(500).send(err.toString());
-  }
+  const results = await Promise.all(subscriptions.map(sub => 
+    webpush.sendNotification(sub, payload).catch(err => console.error(err))
+  ));
+
+  res.send('Push отправлен всем пользователям');
 });
 
-app.listen(3000, () => console.log('Server started on http://localhost:3000'));
+app.listen(3000, () => console.log('Server started!'));

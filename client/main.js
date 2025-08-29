@@ -68,7 +68,7 @@ async function subscribeToPush() {
   });
 
   // Отправляем subscription на сервер
-  await fetch('http://localhost:3000/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub) });
+  await fetch('https://pwa-p.onrender.com/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub) });
 
 
   console.log('Subscribed and sent to server');
