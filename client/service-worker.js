@@ -1,5 +1,5 @@
 var CACHE_NAME = 'pwa-cache-v1';
-const OFFLINE_URL = '/pwa/client/offline.html';
+const OFFLINE_URL = '/offline.html';
 
 var urlsToCache = [
   './',

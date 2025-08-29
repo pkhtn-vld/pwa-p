@@ -5,11 +5,11 @@ const { json } = require('express');
 const webpush = require('web-push');
 const cors = require('cors');
 const app = express();
-app.use(json());
+const path = require('path');
 
-// Разрешаем CORS для всех источников (для теста)
 app.use(cors());
 app.use(json());
+app.use(express.static(path.join(__dirname, '../client')));
 
 const VAPID_PUBLIC = process.env.publicKey;
 const VAPID_PRIVATE = process.env.privateKey;
