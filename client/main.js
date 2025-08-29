@@ -1,5 +1,7 @@
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('service-worker.js');
+  navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
+    .then(reg => console.log('SW зарегистрирован', reg))
+    .catch(err => console.error('Ошибка регистрации SW:', err));
 }
 
 // Проверка режима установки и сетевого статуса

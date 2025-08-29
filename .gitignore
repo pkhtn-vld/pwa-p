@@ -1,5 +1,4 @@
 node_modules
 .env
-client/assets
 sys
 server/generate-vapid.js

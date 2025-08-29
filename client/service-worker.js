@@ -2,12 +2,12 @@ var CACHE_NAME = 'pwa-cache-v1';
 const OFFLINE_URL = '/offline.html';
 
 var urlsToCache = [
-  './',
-  './index.html',
-  './main.js',
-  './manifest.json',
-  './assets/icon-phone-192.png',
-  './assets/icon-phone-512.png',
+  '/',
+  '/index.html',
+  '/main.js',
+  '/manifest.json',
+  '/assets/icon-phone-192.png',
+  '/assets/icon-phone-512.png',
   OFFLINE_URL
 ];
 
