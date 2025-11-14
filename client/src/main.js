@@ -1,3 +1,4 @@
+import { loadAndRenderUsers, ensureTopBar } from "./userList.js";
 import "../style.css";
 import "./auth.js";
 import "./presence.js";
