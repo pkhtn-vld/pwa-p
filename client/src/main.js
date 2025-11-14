@@ -9,63 +9,6 @@ if ('serviceWorker' in navigator) {
     .catch(err => console.error('Ошибка регистрации SW:', err));
 }
 
-/////////////////////////////////////
-// Отладка
-(function installGlobalClientLogger(){
-  function sendDebug(payload) {
-    try {
-      // Пытаемся отправить быстро: keepalive и короткий таймаут.
-      fetch('/debug-log', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        keepalive: true
-      }).catch(() => { /* ignore */ });
-    } catch (e) { /* ignore */ }
-  }
-
-  window.addEventListener('error', function(ev) {
-    try {
-      const payload = {
-        level: 'error',
-        message: String(ev.message || ''),
-        filename: ev.filename || '',
-        lineno: ev.lineno || 0,
-        colno: ev.colno || 0,
-        stack: (ev.error && ev.error.stack) ? String(ev.error.stack) : null,
-        ts: Date.now()
-      };
-      sendDebug(payload);
-    } catch (e) {}
-  });
-
-  window.addEventListener('unhandledrejection', function(ev) {
-    try {
-      const reason = ev.reason || {};
-      const payload = {
-        level: 'unhandledrejection',
-        reason: typeof reason === 'string' ? reason : (reason && reason.message) || JSON.stringify(reason) || String(reason),
-        stack: reason && reason.stack ? reason.stack : null,
-        ts: Date.now()
-      };
-      sendDebug(payload);
-    } catch (e) {}
-  });
-
-  // перехват fetch ошибок (короткий instrument)
-  const _origFetch = window.fetch;
-  window.fetch = function() {
-    return _origFetch.apply(this, arguments).catch(err => {
-      try {
-        sendDebug({ level: 'fetch-error', message: String(err && err.message), ts: Date.now() });
-      } catch (e) {}
-      throw err;
-    });
-  };
-})();
-/////////////////////////////////////
-
 // Проверка режима установки и сетевого статуса
 function isStandalone() {
   return window.matchMedia('(display-mode: standalone)').matches ||
@@ -115,19 +58,6 @@ async function subscribeToPush() {
   });
 
   const userKey = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
-
-  // to dev
-  fetch('/debug-log', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          event: 'subscribeToPush',
-          sub: sub,
-          userKey: userKey
-        }),
-        keepalive: true
-      }).catch(() => { });
 
   if (sub && userKey) {
     const res = await fetch('/subscribe', {
@@ -182,3 +112,59 @@ navigator.serviceWorker.addEventListener('message', (ev) => {
     document.dispatchEvent(new CustomEvent('open_chat', { detail: { from } }));
   }
 });
+
+async function checkSession() {
+  try {
+    const resp = await fetch('/session', { credentials: 'include' });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.authenticated) {
+        console.log('checkSession done');
+        
+        const displayName = data.userName;
+        // повторяем логику как после успешного login:
+        localStorage.setItem('pwaUserName', displayName);
+
+        // скрываем форму
+        const btnLogin = document.getElementById("login");
+        const btnRegister = document.getElementById("register");
+        const headerAuth = document.getElementById("headerAuth");
+        const userInput = document.getElementById("userName");
+        const label = document.getElementById("userNameLabel");
+        if (btnLogin) btnLogin.style.display = 'none';
+        if (btnRegister) btnRegister.style.display = 'none';
+        if (headerAuth) headerAuth.style.display = 'none';
+        if (userInput) userInput.style.display = 'none';
+        if (label) label.style.display = 'none';
+
+        const resultBlock = document.getElementById("result");
+        if (resultBlock) {
+          resultBlock.textContent = "✅ Авторизация по cookie!\nДобро пожаловать " + displayName;
+          setTimeout(() => { resultBlock.style.display = 'none'; }, 1000);
+        }
+
+        // проверка подписки
+        try {
+          const r = await fetch('/has-subscription', { credentials: 'include' });
+          if (r.ok) {
+            const j = await r.json();
+            const el = document.getElementById('pushBtnServ');
+            if (el) el.style.display = j.hasSubscription ? 'none' : 'block';
+          }
+        } catch (e) {
+          const el = document.getElementById('pushBtnServ');
+          if (el) el.style.display = 'block';
+        }
+
+        // top bar + presence
+        ensureTopBar(displayName);
+        await ensurePresenceClient();
+        await loadAndRenderUsers();
+      }
+    }
+  } catch (err) {
+    console.error("Ошибка проверки сессии:", err);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', checkSession);

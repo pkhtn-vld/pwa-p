@@ -637,6 +637,7 @@ app.use((req, res) => {
       getSessionById: (sessionId) => sessions[sessionId] || null,
       onSignal: async (from, to, payload, delivered) => {
         console.log('signal', from, '->', to, 'delivered=', delivered);
+        console.log('payload: ', payload);
         // если сообщение не было доставлено через WS — отправим web-push подписчикам получателя
         if (!delivered) {
           try {

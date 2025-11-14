@@ -1,6 +1,4 @@
-// client/presence.js
 export function createPresenceClient(opts = {}) {
-  // базовый ws url (wss для https)
   const baseUrl = opts.url || `${(location.protocol === 'https:' ? 'wss' : 'ws')}://${location.host}/ws`;
   let ws = null;
   let connected = false;
@@ -29,7 +27,6 @@ export function createPresenceClient(opts = {}) {
   function connect() {
     // если уже подключаемся/подключены — ничего не делаем
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-    // const wsUrl = buildWsUrl(sessionId);
     try {
       ws = new WebSocket(baseUrl);
     } catch (e) {
@@ -75,8 +72,6 @@ export function createPresenceClient(opts = {}) {
       try { ws.close(); } catch (e) {}
       if (hbInterval) { clearInterval(hbInterval); hbInterval = null; }
     });
-
-    // ping/pong handled by server
   }
 
   // проверяет /session — если аутентифицировано, подключается.

@@ -26,7 +26,7 @@ export function updateOnlineList(onlineArray) {
   }
 }
 
-// для обновления точки в заголовке чата ----
+// для обновления точки в заголовке чата
 function updateChatStatusDot(userKey) {
   try {
     if (!userKey) return;
@@ -122,7 +122,7 @@ function createTopBarIfMissing() {
   return top;
 }
 
-// Устанавливает текст и аватар в верхней полосе.
+// Устанавливает текст и аватар в верхней полосе
 export function ensureTopBar(displayName) {
   const top = createTopBarIfMissing();
   const nameEl = document.getElementById('topBarName');
@@ -263,18 +263,10 @@ export async function loadAndRenderUsers() {
     const r = await fetch('/users', { credentials: 'include' });
     if (!r.ok) {
       console.warn('Не удалось загрузить список пользователей:', r.status);
-      fetch('/debug-log', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: 'loadAndRenderUsers-load-users-faled', error: r.status, ts: Date.now() }), keepalive: true }).catch(()=>{});
-      try {
-        const text = await r.text().catch(()=>null);
-        fetch('/debug-log', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: 'loadAndRenderUsers-failed', status: r.status, body: text, ts: Date.now() }), keepalive: true }).catch(()=>{});
-      } catch (e) {
-        fetch('/debug-log', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: 'loadAndRenderUsers-failed', status: e.message, body: text, ts: Date.now() }), keepalive: true }).catch(()=>{});
-      }
       return;
     }
     const data = await r.json().catch(async (e)=> {
       const txt = await r.text().catch(()=>null);
-      fetch('/debug-log', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: 'loadAndRenderUsers-json-parse-failed', error: String(e && e.message), text: txt, ts: Date.now() }), keepalive: true }).catch(()=>{});
       return null;
     });
     if (!data) return;
@@ -282,11 +274,9 @@ export async function loadAndRenderUsers() {
       renderUserList(data.users);
     } else {
       // неожиданный формат
-      fetch('/debug-log', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: 'loadAndRenderUsers-bad-format', resp: data, ts: Date.now() }), keepalive: true }).catch(()=>{});
     }
   } catch (err) {
     console.error('Ошибка при загрузке пользователей:', err);
-    try { fetch('/debug-log', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: 'loadAndRenderUsers-exception', error: String(err && (err.message || err)), stack: err && err.stack || null, ts: Date.now() }), keepalive: true }); } catch (e) {}
   }
 }
 
