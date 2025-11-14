@@ -1,0 +1,6 @@
+node_modules
+.env
+sys
+server/generate-vapid.js
+test.js
+dist

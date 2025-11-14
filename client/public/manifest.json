@@ -1,0 +1,40 @@
+{
+  "name": "PWA",
+  "short_name": "PWA",
+  "description": "Тестовое PWA",
+  "lang": "ru",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "id": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#000000",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/assets/icon-phone-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/icon-phone-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "screenshots": [
+  {
+    "src": "/assets/wide-desktop.png",
+    "sizes": "1280x720",
+    "type": "image/png",
+    "form_factor": "wide"
+  },
+  {
+    "src": "/assets/mobile.png",
+    "sizes": "360x640",
+    "type": "image/png"
+  }
+]
+}

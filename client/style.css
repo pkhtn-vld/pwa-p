@@ -1,0 +1,130 @@
+body {
+  font-family: Arial, sans-serif;
+  background: #f5f7fa;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 100vh;
+}
+
+h1 {
+  font-size: 2rem;
+  margin: 2rem 0 1rem;
+  text-align: center;
+  color: #333;
+}
+
+button {
+  display: block;
+  width: 80%;
+  max-width: 320px;
+  padding: 1rem;
+  margin: 1rem auto;
+  font-size: 1.2rem;
+  font-weight: bold;
+  border: none;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #4facfe, #00f2fe);
+  color: white;
+  cursor: pointer;
+  transition: transform 0.1s ease, box-shadow 0.2s ease;
+}
+
+button:disabled {
+  background: #ccc;
+  color: #666;
+  cursor: not-allowed;
+  box-shadow: none;
+  opacity: 0.7;
+  transform: none;
+}
+
+button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+}
+
+#result {
+  margin-top: 2rem;
+  font-size: 1.3rem;
+  font-weight: bold;
+  color: #2d862d;
+  text-align: center;
+}
+
+#debug {
+  background: #f4f4f4;
+  padding: 10px;
+  border: 1px solid #ccc;
+  max-width: 350px;
+  margin: 0 auto;
+  max-height: 33vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+#settings-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 18px;
+  width: 50px;
+  height: 50px;
+  margin: 0;
+  padding: 0;
+}
+
+#chat-back-btn {
+  font-size: 20px;
+  border: none;
+  background: rgb(11, 147, 246);
+  cursor: pointer;
+  width: 46px;
+  height: 46px;
+  margin: 0;
+  padding: 0;
+}
+
+#chatSendBtn {
+  border: none;
+  background: rgb(11, 147, 246);
+  color: rgb(255, 255, 255);
+  padding: 10px 12px;
+  cursor: pointer;
+  width: 46px;
+  height: 46px;
+}
+
+#pushBtnServ, #network, #mode {
+  display: none;
+}
+
+#userName {
+  width: 80%;
+  max-width: 320px;
+  padding: 0.6rem;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+  box-sizing: border-box;
+  display: block;
+  margin: 0.5rem auto;
+}
+
+#userNameLabel {
+  margin-top: 10px;
+  margin-top: 10px;
+  width: 80%;
+  max-width: 320px;
+  box-sizing: border-box;
+  margin-left: auto;
+  margin-right: auto;
+  display: block;
+}
+
+#status {
+  width: 100%;
+}
