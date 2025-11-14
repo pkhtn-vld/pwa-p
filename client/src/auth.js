@@ -4,7 +4,7 @@ import { createPresenceClient } from "./presence.js";
 
 let pc = null;
 
-async function ensurePresenceClient() {
+export async function ensurePresenceClient() {
   if (pc) return pc;
   pc = createPresenceClient();
   // Попытка подключиться немедленно, если уже есть сессия
