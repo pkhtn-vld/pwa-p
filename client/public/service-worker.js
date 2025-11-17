@@ -69,14 +69,43 @@ self.addEventListener('notificationclick', function (event) {
 
 self.addEventListener('push', event => {
   let data = {};
-  try { data = event.data.json(); } catch (e) { data = { body: event.data.text() }; }
-  const title = data.title || 'Новое сообщение';
-  const options = {
-    body: data.body,
-    data: data.data || {},
-    tag: data.tag || ('chat-' + (data.data && data.data.from || Date.now())),
-    renotify: true,
-    icon: '/assets/icon-phone-192.png'
-  };
-  event.waitUntil(self.registration.showNotification(title, options));
+  try {
+    data = event.data && event.data.json ? event.data.json() : {};
+  } catch (e) {
+    try { data = { body: event.data && event.data.text ? event.data.text() : '' }; } catch (ee) { data = {}; }
+  }
+
+  event.waitUntil((async () => {
+    // Получим все открытые окна/вкладки PWA
+    const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+
+    // Если есть открытые клиенты — отправим им push-данные (они решат, показывать ли UI/note)
+    if (allClients && allClients.length > 0) {
+      // отметим, есть видимые клиенты
+      let anyVisible = false;
+      for (const c of allClients) {
+        try {
+          // WindowClient имеет visibilityState: 'visible'|'hidden'
+          if (c.visibilityState === 'visible') anyVisible = true;
+        } catch (e) { }
+        // отправляем сообщение в клиент — пусть клиент решает, показывать in-app toast или обновлять чат
+        try { c.postMessage({ type: 'push', data }); } catch (e) { }
+      }
+
+      // Если хотя бы одно окно видно (пользователь взаимодействует) — НЕ показываем нативную нотификацию
+      if (anyVisible) return;
+      // иначе — все окна есть, но скрыты/минімізированы — продолжаем и покажем notification
+    }
+
+    // Если нет открытых клиентов или все скрыты — показываем нотификацию
+    const title = data.title || 'Новое сообщение';
+    const options = {
+      body: data.body || '',
+      data: data.data || {},
+      tag: data.tag || ('chat-' + (data.data && data.data.from || Date.now())),
+      renotify: true,
+      icon: '/assets/icon-phone-192.png'
+    };
+    await self.registration.showNotification(title, options);
+  })());
 });
