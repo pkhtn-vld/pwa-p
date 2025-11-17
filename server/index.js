@@ -661,11 +661,15 @@ app.use((req, res) => {
       onSignal: async (from, to, payload, delivered) => {
         console.log('signal', from, '->', to, 'delivered=', delivered);
         console.log('payload: ', payload);
+        console.log('onSignal:', { from, to, delivered, text: (payload && payload.text) ? String(payload.text).slice(0, 50) : '' });
+
         // если сообщение не было доставлено через WS — отправим web-push подписчикам получателя
         if (!delivered) {
           try {
             const toKey = (to || '').toString().toLowerCase();
             const subs = subscriptionsByUser[toKey] || [];
+
+            console.log('-> will send webpush, subsCount=', subs.length, 'toKey=', toKey, 'endpoints=', subs.map(s => s.endpoint && s.endpoint.slice(0, 80)));
 
             if (subs.length > 0) {
               const pushPayload = JSON.stringify({
@@ -677,6 +681,7 @@ app.use((req, res) => {
               await Promise.all(subs.map(async (s) => {
                 try {
                   await webpush.sendNotification(s, pushPayload);
+                  console.log('webpush sent to', (s.endpoint || '').slice(0, 80));
                 } catch (err) {
                   console.error('webpush send error', err && err.statusCode);
                   // удалить подписку при 410 Gone
@@ -689,7 +694,7 @@ app.use((req, res) => {
                 }
               }));
             } else {
-              console.log('No subscriptions for', to);
+              console.log('-> skip webpush because delivered=true');
             }
           } catch (e) {
             console.error('onSignal->webpush error', e && e.stack || e);
