@@ -9,6 +9,39 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
     .then(reg => console.log('SW зарегистрирован', reg))
     .catch(err => console.error('Ошибка регистрации SW:', err));
+
+
+    navigator.serviceWorker.addEventListener('message', (ev) => {
+    const msg = ev.data;
+    if (!msg || msg.type !== 'push') return;
+    const payload = msg.data || {};
+    // payload.data.from — от кого
+    // payload.payload — содержимое chat_message (если вы отправляете так)
+    // Логика: если сейчас открыт чат с payload.data.from -> добавить сообщение в UI
+    // иначе показать in-app toast (не системную нотификацию)
+    try {
+      handleIncomingPushFromSW(payload);
+    } catch (e) { console.warn('handleIncomingPushFromSW error', e && e.message); }
+  });
+}
+
+// заглушка
+function handleIncomingPushFromSW(payload) {
+  const from = payload && payload.data && payload.data.from;
+  if (!from) {
+    // показать in-app toast с payload.body
+    // showInAppToast(payload.title || 'Новое сообщение', payload.body || '');
+    alert('Новое сообщение: ' + payload.body);
+    return;
+  }
+  // если открыт чат с from — вставляем сообщение, иначе — показать in-app toast
+  // if (isChatOpenWith(from)) {
+    // insertMessageToChat(from, payload);
+    alert('Новое сообщение от: ' + from + ': ' + payload.body);
+  // } else {
+    // showInAppToast(payload.title || 'Новое сообщение', payload.body || '');
+    // alert('Новое сообщение: ' + payload.body);
+  // }
 }
 
 // Проверка режима установки и сетевого статуса

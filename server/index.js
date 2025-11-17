@@ -669,16 +669,27 @@ app.use((req, res) => {
             const toKey = (to || '').toString().toLowerCase();
             const subs = subscriptionsByUser[toKey] || [];
 
-            console.log('-> will send webpush, subsCount=', subs.length, 'toKey=', toKey, 'endpoints=', subs.map(s => s.endpoint && s.endpoint.slice(0, 80)));
+            // Дедупликация подписок по endpoint (на всякий случай)
+            const uniq = [];
+            const seen = new Set();
+            for (const s of subs) {
+              const ep = s && s.endpoint ? s.endpoint : '';
+              if (ep && !seen.has(ep)) {
+                seen.add(ep);
+                uniq.push(s);
+              }
+            }
 
-            if (subs.length > 0) {
+            console.log('-> will send webpush, subsCount=', uniq.length, 'toKey=', toKey, 'endpoints=', uniq.map(s => (s.endpoint || '').slice(0, 80)));
+
+            if (uniq.length > 0) {
               const pushPayload = JSON.stringify({
                 title: `Новое сообщение от ${from}`,
                 body: String((payload && payload.text) || '').slice(0, 200),
                 data: { from, payload }
               });
 
-              await Promise.all(subs.map(async (s) => {
+              await Promise.all(uniq.map(async (s) => {
                 try {
                   await webpush.sendNotification(s, pushPayload);
                   console.log('webpush sent to', (s.endpoint || '').slice(0, 80));
@@ -694,12 +705,15 @@ app.use((req, res) => {
                 }
               }));
             } else {
-              console.log('-> skip webpush because delivered=true');
+              console.log('-> no subscriptions for', toKey);
             }
           } catch (e) {
             console.error('onSignal->webpush error', e && e.stack || e);
           }
+        } else {
+          console.log('-> skip webpush because delivered=true');
         }
+
       },
       expectedOrigin: EXPECTED_ORIGIN,
       allowSessionQuery: false
