@@ -1,6 +1,7 @@
 import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
 import { loadAndRenderUsers, ensureTopBar, updateOnlineList, setPresenceClient, handleIncomingMessage, showInAppToast } from "./userList.js";
 import { createPresenceClient } from "./presence.js";
+import { ensureKeypair } from "./cryptoSodium.js";
 
 let pc = null;
 
@@ -181,44 +182,33 @@ if (btnLogin) {
         const label = document.getElementById("userNameLabel");
         if (label) label.style.display = 'none';
 
-        // Показать успешный текст + приветствие (используем displayName)
-        if (resultBlock) {
-          localStorage.setItem('pwaUserName', displayName);
+        localStorage.setItem('pwaUserName', displayName);
 
-          // проверим наличие подписки у текущего (аутентифицированного) пользователя
-          try {
-            // запрос сделаем с credentials: 'include' чтобы cookie-сессия использовалась
-            const r = await fetch('/has-subscription', { credentials: 'include' });
-            if (r.ok) {
-              const j = await r.json();
-              if (j && j.hasSubscription) {
-                // подписка уже есть — прячем кнопку
-                const el = document.getElementById('pushBtnServ');
-                if (el) el.style.display = 'none';
-              } else {
-                // нет подписки — показываем кнопку
-                const el = document.getElementById('pushBtnServ');
-                if (el) el.style.display = 'block';
-              }
-            } else {
-              // если запрос вернул 401 — не авторизован, показываем кнопку как fallback
-              const el = document.getElementById('pushBtnServ');
+        // проверим наличие действующей подписки у текущего (аутентифицированного) пользователя
+        try {
+          const el = document.getElementById('pushBtnServ');
+          const ok = await ensureServerHasCurrentSubscription();
+
+          // если ensureServerHasCurrentSubscription() вернул true — локальная и серверная подписки совпадают
+          if (ok === true) {
+            const isFreshInstall = checkInstallMarker();
+
+            if (isFreshInstall) {
+              // при первой установке данных в localstorage считаем что приложение переустанавливалось
               if (el) el.style.display = 'block';
-              alert('Ошибка при выполнении запроса на подписку')
+              console.log('Push subscription mismatch or missing — showing push button');
+            } else {
+              if (el) el.style.display = 'none';
             }
-          } catch (e) {
-            alert('has-subscription check failed \n' + e);
-            // в случае ошибки по сети — отображаем кнопку (пользователь может захотеть подписаться)
-            const el = document.getElementById('pushBtnServ');
-            if (el) el.style.display = 'block';
           }
-
-          // скрываем результат и показываем/скроем кнопку спустя небольшой таймаут UX (как у тебя было)
-          try {
-            if (resultBlock) {
-              setTimeout(() => { resultBlock.style.display = 'none'; }, 1000);
-            }
-          } catch (e) { }
+          // если ok !== true → есть проблема, нужно показать кнопку
+          else {
+            if (el) el.style.display = 'block';
+            console.log('Push subscription mismatch or missing — showing push button');
+          }
+        } catch (e) {
+          console.warn('Subscription check failed', e);
+          if (el) el.style.display = 'block';
         }
 
         // подготовим top bar и загрузим список пользователей
@@ -233,11 +223,9 @@ if (btnLogin) {
       } else {
         if (resultBlock) resultBlock.textContent = "❌ Ошибка авторизации";
       }
-      
+
       return;
     }
-
-
 
     try {
       const options = await fetch(`/auth-challenge?userName=${encodeURIComponent(userKey)}`).then(r => r.json());
@@ -276,38 +264,42 @@ if (btnLogin) {
         const label = document.getElementById("userNameLabel");
         if (label) label.style.display = 'none';
 
-        // Показать успешный текст + приветствие (используем displayName)
-        if (resultBlock) {
-          localStorage.setItem('pwaUserName', displayName);
+        localStorage.setItem('pwaUserName', displayName);
 
-          // проверим наличие действующей подписки у текущего (аутентифицированного) пользователя
-          try {
-            const ok = await ensureServerHasCurrentSubscription();
+        // создаём пару ключей и отсылаем публичный ключ на сервер
+        try {
+          console.log('[auth] post-register: ensure sodium keypair for', userKey);
+          await ensureKeypair(userKey);
+          console.log('[auth] sodium keypair ensured after registration for', userKey);
+        } catch (e) {
+          console.error('[auth] ensureKeypair after registration failed', e);
+        }
 
-            // если ensureServerHasCurrentSubscription() вернул true — локальная и серверная подписки совпадают
-            if (ok === true) {
-              const el = document.getElementById('pushBtnServ');
-              if (el) el.style.display = 'none';
-              console.log('Push subscription OK — hiding push button');
-            }
-            // если ok !== true → есть проблема, нужно показать кнопку
-            else {
-              const el = document.getElementById('pushBtnServ');
+        // проверим наличие действующей подписки у текущего (аутентифицированного) пользователя
+        try {
+          const el = document.getElementById('pushBtnServ');
+          const ok = await ensureServerHasCurrentSubscription();
+
+          // если ensureServerHasCurrentSubscription() вернул true — локальная и серверная подписки совпадают
+          if (ok === true) {
+            const isFreshInstall = checkInstallMarker();
+
+            if (isFreshInstall) {
+              // при первой установке данных в localstorage считаем что приложение переустанавливалось
               if (el) el.style.display = 'block';
               console.log('Push subscription mismatch or missing — showing push button');
+            } else {
+              if (el) el.style.display = 'none';
             }
-          } catch (e) {
-            console.warn('Subscription check failed', e);
-            const el = document.getElementById('pushBtnServ');
-            if (el) el.style.display = 'block';
           }
-
-          // скрываем результат и показываем/скроем кнопку спустя небольшой таймаут UX (как у тебя было)
-          try {
-            if (resultBlock) {
-              setTimeout(() => { resultBlock.style.display = 'none'; }, 1000);
-            }
-          } catch (e) { }
+          // если ok !== true → есть проблема, нужно показать кнопку
+          else {
+            if (el) el.style.display = 'block';
+            console.log('Push subscription mismatch or missing — showing push button');
+          }
+        } catch (e) {
+          console.warn('Subscription check failed', e);
+          if (el) el.style.display = 'block';
         }
 
         // подготовим top bar и загрузим список пользователей
@@ -326,6 +318,19 @@ if (btnLogin) {
       console.error("❌ Ошибка при авторизации:", err);
     }
   });
+}
+
+// Проверка маркера установки
+function checkInstallMarker() {
+  const marker = localStorage.getItem('installTime');
+  if (!marker) {
+    // Новая установка или очистка данных
+    const now = Date.now();
+    localStorage.setItem('installTime', now);
+    return true;
+  } else {
+    return false;
+  }
 }
 
 async function ensureServerHasCurrentSubscription() {
@@ -348,7 +353,7 @@ async function ensureServerHasCurrentSubscription() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ subscription: localSub, userKey: (localStorage.getItem('pwaUserName')||'').trim().toLowerCase() })
+        body: JSON.stringify({ subscription: localSub, userKey: (localStorage.getItem('pwaUserName') || '').trim().toLowerCase() })
       });
       return;
     }

@@ -37,7 +37,7 @@ self.addEventListener('fetch', event => {
       fetch(event.request).catch(() => caches.match('/offline.html'))
     );
   }
-  
+
   // для статических ресурсов: кэш-первым
   event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request)));
 });
@@ -65,12 +65,41 @@ self.addEventListener('notificationclick', function (event) {
     if (clients.openWindow) {
       if (from) {
         // вы можете прикрепить query param чтобы сразу открыть чат (если реализовано)
-        return clients.openWindow('/'); 
+        return clients.openWindow('/');
       }
       return clients.openWindow('/');
     }
   }));
 });
+
+// saveToIDB(msg)
+// сохраняет объект msg в IndexedDB базы 'pwa-chat', store 'messages'.
+// формат записи ожидаемый клиентом:
+// { from, to, text, encrypted: true|false, ts, meta: {...} }
+// возвращает Promise<boolean> — true если записано, false при ошибке.
+function saveToIDB(msg) {
+  return new Promise((resolve) => {
+    try {
+      const rq = indexedDB.open('pwa-chat', 1);
+      rq.onupgradeneeded = function (e) {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('messages')) db.createObjectStore('messages', { keyPath: 'id', autoIncrement: true });
+      };
+      rq.onsuccess = function (e) {
+        const db = e.target.result;
+        const tx = db.transaction('messages', 'readwrite');
+        const store = tx.objectStore('messages');
+        store.add(msg);
+        tx.oncomplete = function () { db.close(); resolve(true); };
+        tx.onerror = function () { db.close(); resolve(false); };
+      };
+      rq.onerror = function () { resolve(false); };
+    } catch (e) {
+      console.warn('[SW] saveToIDB exception', e);
+      resolve(false);
+    }
+  });
+}
 
 self.addEventListener('push', event => {
   ///////
@@ -82,34 +111,57 @@ self.addEventListener('push', event => {
   }
 
   event.waitUntil((async () => {
-    // Получим все открытые окна/вкладки PWA (включая неконтролируемые)
-    const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    try {
+      // Получим все открытые окна/вкладки PWA (включая неконтролируемые)
+      const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
 
-    // Отправим push-данные всем клиентам (они обновят UI или покажут in-app toast)
-    for (const c of allClients) {
-      try { c.postMessage({ type: 'push', data }); } catch (e) { /* ignore */ }
-    }
+      // Отправим push-данные всем клиентам (они обновят UI или покажут in-app toast)
+      for (const c of allClients) {
+        try { c.postMessage({ type: 'push', data }); } catch (e) { /* ignore */ }
+      }
 
-    // Проверим, есть ли видимый клиент (visibilityState === 'visible')
-    let anyVisible = false;
-    for (const c of allClients) {
+      // Сохраняем payload в IndexedDB *всегда* — чтобы клиент мог потом получить историю и расшифровать.
+      // payload формат в сервере: { title, body, data: { from, payload } }
       try {
-        if (c.visibilityState === 'visible') { anyVisible = true; break; }
-      } catch (e) { /* ignore */ }
+        const from = (data.data && data.data.from) || null;
+        const payload = (data.data && data.data.payload) || null;
+        const msgToSave = {
+          from,
+          to: null,
+          text: payload && payload.text ? payload.text : (data.body || ''),
+          encrypted: !!(payload && payload.encrypted),
+          ts: Date.now(),
+          meta: { via: 'push' }
+        };
+        const ok = await saveToIDB(msgToSave);
+        console.log('[SW] saveToIDB for push returned', !!ok, 'from=', from);
+      } catch (e) {
+        console.warn('[SW] failed to save push payload to IDB', e && (e.stack || e));
+      }
+
+      // Проверим, есть ли видимый клиент (visibilityState === 'visible')
+      let anyVisible = false;
+      for (const c of allClients) {
+        try {
+          if (c.visibilityState === 'visible') { anyVisible = true; break; }
+        } catch (e) { /* ignore */ }
+      }
+
+      // Если есть видимый клиент — НЕ показываем системную нотификацию (in-app toast достаточно)
+      if (anyVisible) return;
+
+      // В противном случае (нет видимых окон) — показываем нативную нотификацию
+      const title = data.title || 'Новое сообщение';
+      const options = {
+        body: data.body || '',
+        data: data.data || {}, // payload.data должен содержать { from, ... }
+        tag: data.tag || ('chat-' + (data.data && data.data.from || Date.now())),
+        renotify: true,
+        icon: '/assets/icon-phone-192.png'
+      };
+      await self.registration.showNotification(title, options);
+    } catch (e) {
+      console.error('[SW] push handler fatal error', e && (e.stack || e));
     }
-
-    // Если есть видимый клиент — НЕ показываем системную нотификацию (in-app toast достаточно)
-    if (anyVisible) return;
-
-    // В противном случае (нет видимых окон) — показываем нативную нотификацию
-    const title = data.title || 'Новое сообщение';
-    const options = {
-      body: data.body || '',
-      data: data.data || {}, // payload.data должен содержать { from, ... }
-      tag: data.tag || ('chat-' + (data.data && data.data.from || Date.now())),
-      renotify: true,
-      icon: '/assets/icon-phone-192.png'
-    };
-    await self.registration.showNotification(title, options);
   })());
 });

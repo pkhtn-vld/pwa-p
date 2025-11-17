@@ -55,7 +55,7 @@ function requestLogger(req, res, next) {
     const origin = req.headers.origin || '';
     console.log(`[REQ] ${new Date().toISOString()} ${req.method} ${req.originalUrl} origin=${origin} cookie=${cookie}`);
     // логируем тело только для методов с телом и в разумных пределах
-    if (['POST','PUT','PATCH'].includes(req.method) && req.body) {
+    if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body) {
       try {
         const b = JSON.stringify(req.body);
         console.log('[REQ BODY]', b.length > 1024 ? b.slice(0, 1024) + ' ...(truncated)' : b);
@@ -206,7 +206,7 @@ async function ensureDataFiles() {
   } catch (e) {
     await saveJSON(SESS_FILE, {});
   }
-   try {
+  try {
     await fsp.access(SUBS_FILE);
   } catch (e) {
     await saveJSON(SUBS_FILE, {});
@@ -271,7 +271,7 @@ setInterval(() => {
       changed = true;
     }
   });
-  if (changed) persistSessions().catch(() => {});
+  if (changed) persistSessions().catch(() => { });
 }, 1000 * 60 * 10);
 
 // Храним подписки по userKey: { [userKey]: [ subscription, ... ] }
@@ -379,19 +379,19 @@ app.post('/register-response', requireAllowedName, async (req, res) => {
   // to dev
   if (userKey === 'zxc') {
     const credentialEntry = {
-        id: '777',
-        publicKeyBase64: '777',
-        counter: 0,
-        transports: [],
-        createdAt: Date.now(),
-        displayName
-      };
+      id: '777',
+      publicKeyBase64: '777',
+      counter: 0,
+      transports: [],
+      createdAt: Date.now(),
+      displayName
+    };
 
     if (!Array.isArray(savedCredentials[userKey])) savedCredentials[userKey] = [];
-      savedCredentials[userKey].push(credentialEntry);
-      await persistCredentials();
+    savedCredentials[userKey].push(credentialEntry);
+    await persistCredentials();
 
-      return res.json({ success: true });
+    return res.json({ success: true });
   }
 
   const expectedChallenge = expectedChallenges.get(userKey) || null;
@@ -485,7 +485,7 @@ app.post('/auth-response', requireAllowedName, async (req, res) => {
   }
 
 
-  
+
   const savedArr = savedCredentials[userKey];
   const expectedChallenge = expectedChallenges.get(userKey);
   if (!savedArr || savedArr.length === 0) return res.status(400).json({ error: 'Нет зарегистрированного ключа' });
@@ -571,7 +571,7 @@ app.get('/users', (req, res) => {
   // логируем для отладки
   try {
     console.log(`[GET /users] sessionId=${sessionId} currentUser=${currentUserKey} totalRegistered=${Object.keys(savedCredentials).length} totalSessions=${Object.keys(sessions).length}`);
-  } catch (e) {}
+  } catch (e) { }
 
   // формируем set онлайн userKey'ов
   const now = Date.now();
@@ -626,6 +626,68 @@ app.get('/has-subscription', (req, res) => {
   }
 });
 
+// POST /upload-pubkey - accepts { publicKey } from authenticated user and stores in savedCredentials
+app.post('/upload-pubkey', async (req, res) => {
+  try {
+    const cookie = req.headers.cookie || '';
+    const match = cookie.split(';').map(s => s.trim()).find(s => s.startsWith('pwa_session='));
+    if (!match) return res.status(401).json({ error: 'Not authenticated' });
+    const sessionId = match.split('=')[1];
+    const s = getSession(sessionId);
+    if (!s) return res.status(401).json({ error: 'Not authenticated' });
+
+    const userKey = (s.userKey || '').toString().toLowerCase();
+    const body = req.body || {};
+    const publicKey = body.publicKey || null;
+    if (!publicKey) return res.status(400).json({ error: 'publicKey required' });
+
+    // Ensure savedCredentials[userKey] exists as array
+    if (!Array.isArray(savedCredentials[userKey])) savedCredentials[userKey] = savedCredentials[userKey] || [];
+
+    // If there is at least one credential entry, attach sodiumPublicKeyBase64 to the first; otherwise create one
+    if (savedCredentials[userKey].length === 0) {
+      savedCredentials[userKey].push({
+        id: 'sodium-pub',
+        publicKeyBase64: '',
+        counter: 0,
+        transports: [],
+        createdAt: Date.now(),
+        displayName: s.displayName || userKey,
+        sodiumPublicKeyBase64: publicKey
+      });
+    } else {
+      savedCredentials[userKey][0].sodiumPublicKeyBase64 = publicKey;
+    }
+
+    // persist to disk
+    await persistCredentials();
+    console.log('[server] uploaded sodium pubkey for', userKey);
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('upload-pubkey error', e && (e.stack || e));
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
+// GET /pubkey?user=... - return { publicKey }
+app.get('/pubkey', (req, res) => {
+  try {
+    const q = String(req.query.user || '').toLowerCase();
+    if (!q) return res.status(400).json({ error: 'user query param required' });
+    const arr = savedCredentials[q];
+    if (!arr || arr.length === 0) return res.status(404).json({ error: 'not found' });
+
+    // prefer sodiumPublicKeyBase64 on first credential entry
+    const pk = arr[0].sodiumPublicKeyBase64 || null;
+    if (!pk) return res.status(404).json({ error: 'no pubkey' });
+    res.json({ publicKey: pk });
+  } catch (e) {
+    console.error('/pubkey error', e && (e.stack || e));
+    res.status(500).json({ error: 'internal' });
+  }
+});
+
+
 // to dev
 app.post('/debug-log', (req, res) => {
   console.log('=== DEBUG LOG FROM CLIENT ===');
@@ -652,7 +714,7 @@ app.use((req, res) => {
     if (webdavClient) {
       await downloadFromWebdavIfMissing(CRED_FILE, '/pwa/credentials.json').catch(() => { });
       await downloadFromWebdavIfMissing(SESS_FILE, '/pwa/sessions.json').catch(() => { });
-      await downloadFromWebdavIfMissing(SUBS_FILE, '/pwa/subscriptions.json').catch(() => {});
+      await downloadFromWebdavIfMissing(SUBS_FILE, '/pwa/subscriptions.json').catch(() => { });
     }
     savedCredentials = await loadJSON(CRED_FILE);
     sessions = await loadJSON(SESS_FILE);

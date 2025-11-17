@@ -1,3 +1,12 @@
+import {
+  getPubkey,
+  encryptForPublicBase64,
+  decryptOwn,
+  saveMessageLocal,
+  getMessagesWith,
+  cachePubkey
+} from './cryptoSodium.js';
+
 let presenceClient = null;
 let currentChat = null; // { userKey, displayName, messages: [] }
 let onlineSet = new Set();
@@ -421,17 +430,37 @@ function createChatOverlay() {
   input.style.padding = '10px';
   input.style.border = '1px solid #ddd';
   input.style.borderRadius = '20px';
-  input.addEventListener('keydown', (e) => {
+  input.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      sendChatMessage();
+      try {
+        // дизейблим кнопку чтобы не нажимали несколько раз
+        sendBtn.disabled = true;
+        await sendChatMessage();
+      } catch (err) {
+        console.error('[UI] sendChatMessage error', err && (err.stack || err));
+        showInAppToast('Ошибка', 'Не удалось отправить сообщение');
+      } finally {
+        sendBtn.disabled = false;
+      }
     }
   });
 
   const sendBtn = document.createElement('button');
   sendBtn.id = 'chatSendBtn';
   sendBtn.textContent = '➤';
-  sendBtn.addEventListener('click', sendChatMessage);
+  sendBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    try {
+      sendBtn.disabled = true;
+      await sendChatMessage();
+    } catch (err) {
+      console.error('[UI] sendChatMessage error', err && (err.stack || err));
+      showInAppToast('Ошибка', 'Не удалось отправить сообщение');
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
   inputWrap.appendChild(input);
   inputWrap.appendChild(sendBtn);
 
@@ -471,10 +500,47 @@ export function openChatForUser({ userKey, displayName }) {
   updateChatStatusDot(currentChat.userKey);
 
   renderMessages();
-  setTimeout(() => {
-    const inp = document.getElementById('chatInput');
-    if (inp) inp.focus();
-  }, 50);
+
+  // Асинхронно: загрузим историю из IndexedDB и подставим в currentChat.messages
+    (async () => {
+    try {
+      console.log('[chat] loading history for', normalized);
+      const rows = await getMessagesWith(normalized);
+      currentChat.messages = []; // заменим текущий буфер на содержимое IDB
+      for (const r of rows) {
+        // r: { from, to, text, encrypted, ts, meta }
+        const outgoing = String(r.from || '').toLowerCase() === (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
+        let textForUI = '';
+        if (r.encrypted) {
+          try {
+            // попробуем расшифровать локально (если есть ключ)
+            const plain = await decryptOwn(r.text);
+            textForUI = plain;
+            console.log('[chat] decrypted history msg ts=', r.ts, 'from=', r.from, '->', String(plain).slice(0,120));
+          } catch (e) {
+            textForUI = '[Зашифровано]';
+            console.warn('[chat] cannot decrypt history msg ts=', r.ts, 'from=', r.from, e && e.message ? e.message : e);
+          }
+        } else {
+          textForUI = String(r.text || '');
+        }
+
+        currentChat.messages.push({ outgoing: !!outgoing, text: textForUI, ts: r.ts || Date.now() });
+      }
+
+      // После загрузки истории покажем сообщения
+      renderMessages();
+
+    } catch (e) {
+      console.error('[chat] failed to load history for', normalized, e && (e.stack || e));
+    } finally {
+      // фокус на input
+      setTimeout(() => {
+        const inp = document.getElementById('chatInput');
+        if (inp) inp.focus();
+      }, 50);
+    }
+  })();
 }
 
 function closeChat() {
@@ -512,61 +578,162 @@ function renderMessages() {
   out.scrollTop = out.scrollHeight;
 }
 
-function sendChatMessage() {
+async function sendChatMessage() {
   const inp = document.getElementById('chatInput');
   if (!inp || !currentChat) return;
   const text = (inp.value || '').trim();
   if (!text) return;
   if (text.length > 2000) { alert('Сообщение слишком длинное'); return; }
-  const payload = { type: 'chat_message', text: text, ts: Date.now() };
-  currentChat.messages.push({ outgoing: true, text, ts: payload.ts });
-  renderMessages();
-  inp.value = '';
+
   if (!presenceClient) {
     console.warn('presenceClient not set; cannot send message');
+    showInAppToast('Ошибка', 'Отправка невозможна: не подключён presenceClient');
     return;
   }
+
   try {
-    presenceClient.sendSignal(currentChat.userKey, payload);
+    const recipient = currentChat.userKey;
+    const me = (localStorage.getItem('pwaUserName') || '').trim();
+
+    console.log('[send] preparing to send to=', recipient, 'textPreview=', text.slice(0,50));
+
+    // получаем публичный ключ получателя (кеш/сервер)
+    const pub = await getPubkey(recipient);
+    if (!pub) {
+      console.error('[send] no public key for', recipient);
+      showInAppToast('Ошибка', 'Публичный ключ получателя не найден, отправка отменена');
+      return;
+    }
+
+    // шифруем
+    const cipherB64 = await encryptForPublicBase64(pub, text);
+    console.log('[send] encrypted message (base64 len=', (cipherB64||'').length, ')');
+
+    const ts = Date.now();
+    const payload = { type: 'chat_message', encrypted: true, text: cipherB64, ts };
+
+    // сохраняем зашифрованную копию в IndexedDB (чтобы история всегда была в IDB)
+    try {
+      await saveMessageLocal({ from: me, to: recipient, text: cipherB64, encrypted: true, ts, meta: { sentByMe: true } });
+      console.log('[send] saved encrypted message to IDB (sentByMe)', { to: recipient, ts });
+    } catch (e) {
+      console.warn('[send] failed to save encrypted message to IDB', e && e.message ? e.message : e);
+    }
+
+    // отрисовываем plaintext локально (пользователь должен увидеть своё сообщение сразу)
+    currentChat.messages.push({ outgoing: true, text, ts });
+    renderMessages();
+    inp.value = '';
+
+    // отправляем через presenceClient (может буферизоваться)
+    try {
+      const sent = presenceClient.sendSignal(recipient, payload);
+      console.log('[send] presenceClient.sendSignal returned', sent, 'recipient=', recipient);
+    } catch (e) {
+      console.error('[send] presenceClient.sendSignal threw', e && e.stack ? e.stack : e);
+    }
   } catch (e) {
-    console.error('sendSignal failed', e);
+    console.error('[send] failed', e && (e.stack || e));
+    showInAppToast('Ошибка', 'Не удалось отправить сообщение');
   }
 }
 
 // для получения входящих сообщений из auth.js (presence listener) 
 export function handleIncomingMessage(fromUserKey, payload) {
-  if (!payload || payload.type !== 'chat_message') return false;
-  const text = String(payload.text || '');
-  const from = String(fromUserKey || '').toLowerCase();
-
-  // если открыт чат с этим пользователем — добавим сообщение
-  if (currentChat && currentChat.userKey === from) {
-    currentChat.messages.push({ outgoing: false, text, ts: payload.ts || Date.now() });
-    renderMessages();
-    return true;
-  }
-
-  // иначе — показать визуальную подсказку в списке пользователей + сохранить в localStorage как unread
-  const row = document.querySelector(`.user-row[data-userkey="${from}"]`);
-  if (row) {
-    // пометить левой границей и показать бейдж
-    try {
-      const badge = row.querySelector('.unread-badge');
-      if (badge) badge.style.display = 'inline-block';
-      row.style.borderLeft = '4px solid #0b93f6';
-      setTimeout(() => { try { row.style.borderLeft = ''; } catch (e) { } }, 5000);
-    } catch (e) { }
-  }
-
-  // и сохраняем краткую непрочитанную запись
   try {
-    const key = 'unread_' + from;
-    const prev = JSON.parse(localStorage.getItem(key) || '[]');
-    prev.push({ text: text.slice(0, 200), ts: Date.now() });
-    localStorage.setItem(key, JSON.stringify(prev));
-  } catch (e) { }
+    if (!payload || payload.type !== 'chat_message') return false;
+    const from = String(fromUserKey || '').toLowerCase();
 
-  return false;
+    // лог приходящего сообщения (обрезаем длинную строку для читаемости)
+    try {
+      console.log('[incoming] received from=', from, 'payloadPreview=', JSON.stringify(payload).slice(0,300));
+    } catch (e) { console.log('[incoming] received from=', from); }
+
+    const me = (localStorage.getItem('pwaUserName') || '').trim();
+
+    // если сообщение зашифровано - асинхронно сохраним зашифрованный вариант
+    if (payload.encrypted) {
+      // стартуем асинхронное сохранение (не await'им)
+      (async () => {
+        try {
+          await saveMessageLocal({ from, to: me, text: payload.text, encrypted: true, ts: payload.ts || Date.now(), meta: { deliveredVia: 'ws' } });
+          console.log('[incoming] saved encrypted message to IDB (from=', from, ')');
+        } catch (e) {
+          console.warn('[incoming] failed to save encrypted message to IDB', e && e.message ? e.message : e);
+        }
+      })();
+    } else {
+      // plaintext: сохраняем тоже (compat)
+      (async () => {
+        try {
+          await saveMessageLocal({ from, to: me, text: String(payload.text || ''), encrypted: false, ts: payload.ts || Date.now(), meta: { deliveredVia: 'ws' } });
+          console.log('[incoming] saved plaintext message to IDB (from=', from, ')');
+        } catch (e) {
+          console.warn('[incoming] failed to save plaintext message to IDB', e && e.message ? e.message : e);
+        }
+      })();
+    }
+
+    // Если открыт чат с этим пользователем — попытаемся расшифровать и отобразить.
+    if (currentChat && currentChat.userKey === from) {
+      // Запускаем async-дефракцию/отрисовку, но возвращаем true немедленно.
+      (async () => {
+        try {
+          if (payload.encrypted) {
+            try {
+              const plain = await decryptOwn(payload.text);
+              console.log('[incoming] decrypted message from', from, '->', String(plain).slice(0,200));
+              currentChat.messages.push({ outgoing: false, text: plain, ts: payload.ts || Date.now() });
+              renderMessages();
+            } catch (e) {
+              console.warn('[incoming] decryptOwn failed for message from', from, e && e.message ? e.message : e);
+              // оставить отображение заглушки
+              currentChat.messages.push({ outgoing: false, text: '[Зашифровано]', ts: payload.ts || Date.now() });
+              renderMessages();
+            }
+          } else {
+            // plaintext
+            const plain = String(payload.text || '');
+            currentChat.messages.push({ outgoing: false, text: plain, ts: payload.ts || Date.now() });
+            renderMessages();
+            console.log('[incoming] displayed plaintext message from', from);
+          }
+        } catch (e) {
+          console.error('[incoming] async handler failed', e && (e.stack || e));
+        }
+      })();
+
+      return true; // handled by open chat UI
+    }
+
+    // чат закрыт — отметим в списке пользователей и запомним краткую запись (unread) в localStorage
+    try {
+      const row = document.querySelector(`.user-row[data-userkey="${from}"]`);
+      if (row) {
+        try {
+          const badge = row.querySelector('.unread-badge');
+          if (badge) badge.style.display = 'inline-block';
+          row.style.borderLeft = '4px solid #0b93f6';
+          setTimeout(() => { try { row.style.borderLeft = ''; } catch (e) { } }, 5000);
+        } catch (e) { /* ignore */ }
+      }
+    } catch (e) { }
+
+    // сохраняем в localStorage краткую непрочитанную запись (как раньше)
+    try {
+      const key = 'unread_' + from;
+      const prev = JSON.parse(localStorage.getItem(key) || '[]');
+      const snippet = payload.encrypted ? '[Зашифровано]' : String(payload.text || '');
+      prev.push({ text: snippet.slice(0, 200), ts: Date.now() });
+      localStorage.setItem(key, JSON.stringify(prev));
+    } catch (e) { console.warn('[incoming] failed to store unread in localStorage', e); }
+
+    // не отрисовали в UI (чат не открыт)
+    return false;
+  } catch (e) {
+    console.error('[incoming] handler error', e && (e.stack || e));
+    return false;
+  }
 }
 
 // безопасно очистить элемент
