@@ -129,11 +129,21 @@ if (btnRegister) {
       }).then(r => r.json());
 
       if (regRes && regRes.success) {
-        if (resultBlock) resultBlock.textContent = "✅ Регистрация успешна!";
+        if (resultBlock) {
+          resultBlock.textContent = "✅ Регистрация успешна!";
+          setTimeout(() => {
+            resultBlock.textContent = "";
+          }, 2000);
+        } 
         localStorage.setItem('pwaUserName', displayName);
         btnRegister.style.display = 'none';
       } else {
-        if (resultBlock) resultBlock.textContent = "❌ Ошибка регистрации";
+        if (resultBlock) {
+          resultBlock.textContent = "❌ Ошибка регистрации";
+          setTimeout(() => {
+            resultBlock.textContent = "";
+          }, 2000);
+        } 
       }
     } catch (err) {
       console.error("Ошибка при проверке/регистрации:", err);
