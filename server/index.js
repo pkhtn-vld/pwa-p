@@ -117,6 +117,19 @@ function requireAllowedName(req, res, next) {
 const DATA_DIR = path.join(__dirname, 'data');
 const CRED_FILE = path.join(DATA_DIR, 'credentials.json');
 const SESS_FILE = path.join(DATA_DIR, 'sessions.json');
+const SUBS_FILE = path.join(DATA_DIR, 'subscriptions.json');
+
+// Функция сохранения подписок
+async function persistSubscriptions() {
+  try {
+    await saveJSON(SUBS_FILE, subscriptionsByUser);
+    if (webdavClient) {
+      await uploadToWebdav(SUBS_FILE, '/pwa/subscriptions.json');
+    }
+  } catch (e) {
+    console.error('persistSubscriptions error', e && e.message);
+  }
+}
 
 async function ensureRemoteDir(remoteDir) {
   if (!webdavClient) return false;
@@ -193,6 +206,11 @@ async function ensureDataFiles() {
   } catch (e) {
     await saveJSON(SESS_FILE, {});
   }
+   try {
+    await fsp.access(SUBS_FILE);
+  } catch (e) {
+    await saveJSON(SUBS_FILE, {});
+  }
 }
 
 async function loadJSON(file) {
@@ -259,23 +277,12 @@ setInterval(() => {
 // Храним подписки по userKey: { [userKey]: [ subscription, ... ] }
 const subscriptionsByUser = {};
 app.post('/subscribe', async (req, res) => {
-  console.log('subscribe: cookies=', req.headers.cookie, 'bodyKeys=', Object.keys(req.body || {})); // to dev
   try {
     // проверяем сессию (как в /users)
     const cookie = req.headers.cookie || '';
     const match = cookie.split(';').map(s => s.trim()).find(s => s.startsWith('pwa_session='));
     let sessionId = match ? match.split('=')[1] : null;
     let s = sessionId ? getSession(sessionId) : null;
-
-    // разрешаем клиенту прислать userKey в теле запроса и сохраняем подписку по нему.
-    if (!s) {
-      const allowFallback = String(process.env.DEBUG_ALLOW_SUBSCRIBE_NO_SESSION || '').toLowerCase() === '1';
-      const bodyUserKey = (req.body && (req.body.userKey || req.body.user)) ? String((req.body.userKey || req.body.user)).trim().toLowerCase() : null;
-      if (allowFallback && bodyUserKey) {
-        console.warn('subscribe: using DEBUG fallback userKey=', bodyUserKey);
-        s = { userKey: bodyUserKey, displayName: bodyUserKey };
-      }
-    }
 
     if (!s) {
       console.warn('subscribe: Not authenticated (no valid session) — reject');
@@ -295,8 +302,12 @@ app.post('/subscribe', async (req, res) => {
 
     if (!Array.isArray(subscriptionsByUser[userKey])) subscriptionsByUser[userKey] = [];
     const existing = subscriptionsByUser[userKey].find(x => x.endpoint === subscription.endpoint);
-    if (!existing) subscriptionsByUser[userKey].push(subscription);
 
+    if (!existing) {
+    subscriptionsByUser[userKey].push(subscription);
+    // сразу сохраняем на диск и в WebDAV
+    persistSubscriptions().catch(err => console.error('persistSubscriptions err', err));
+  }
     console.log('Subscription saved for', userKey, 'totalSubs=', subscriptionsByUser[userKey].length);
     return res.status(201).json({ ok: true });
   } catch (e) {
@@ -305,7 +316,8 @@ app.post('/subscribe', async (req, res) => {
   }
 });
 
-// Триггер отправки пуша фиксированного шаблона
+// Триггер отправки пуша фиксированного шаблона 
+// to dev
 app.post('/send', async (req, res) => {
   const payload = JSON.stringify({ title: 'Событие на сервере', body: `Шаблон: ${new Date().toLocaleTimeString()}` });
   const allSubs = Object.values(subscriptionsByUser).flat();
@@ -626,9 +638,20 @@ app.use((req, res) => {
     if (webdavClient) {
       await downloadFromWebdavIfMissing(CRED_FILE, '/pwa/credentials.json').catch(() => { });
       await downloadFromWebdavIfMissing(SESS_FILE, '/pwa/sessions.json').catch(() => { });
+      await downloadFromWebdavIfMissing(SUBS_FILE, '/pwa/subscriptions.json').catch(() => {});
     }
     savedCredentials = await loadJSON(CRED_FILE);
     sessions = await loadJSON(SESS_FILE);
+
+    // Загрузим подписки (если файл пустой — {} -> {})
+    const loadedSubs = await loadJSON(SUBS_FILE);
+    if (loadedSubs && typeof loadedSubs === 'object') {
+      // ожидаем формат { [userKey]: [ subscription, ... ] }
+      Object.keys(loadedSubs).forEach(k => {
+        const lk = String(k).toLowerCase();
+        subscriptionsByUser[lk] = Array.isArray(loadedSubs[k]) ? loadedSubs[k] : [];
+      });
+    }
 
     const server = http.createServer(app);
 
@@ -659,6 +682,9 @@ app.use((req, res) => {
                   // удалить подписку при 410 Gone
                   if (err && err.statusCode === 410) {
                     subscriptionsByUser[toKey] = (subscriptionsByUser[toKey] || []).filter(x => x.endpoint !== s.endpoint);
+
+                    // сразу сохранить изменения
+                    persistSubscriptions().catch(e => console.error('persistSubscriptions err', e));
                   }
                 }
               }));

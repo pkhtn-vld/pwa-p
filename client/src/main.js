@@ -26,6 +26,7 @@ addEventListener('DOMContentLoaded', () => {
   document.getElementById('mode').textContent = isStandalone() ? 'PWA режим' : 'Браузер';
   document.getElementById('network').textContent = isOnline() ? 'Онлайн' : 'Офлайн';
 
+  // TODO: прелоадер добавить
   const savedName = localStorage.getItem('pwaUserName');
   if (savedName) {
     const input = document.getElementById('userName');
