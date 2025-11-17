@@ -95,6 +95,37 @@ export function createPresenceClient(opts = {}) {
     return () => { listeners[evt] = listeners[evt].filter(x => x !== fn); };
   }
 
+  function sendRaw(msg) {
+    try {
+      if (!msg || typeof msg !== 'object') return false;
+      // защита от слишком больших сообщений
+      const s = JSON.stringify(msg);
+      if (s.length > 64 * 1024) { console.warn('sendRaw: message too large'); return false; }
+
+      // ограничение буфера
+      const MAX_PENDING = 200;
+      if (pendingQueue.length >= MAX_PENDING) {
+        console.warn('pendingQueue full, dropping raw message');
+        return false;
+      }
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(s); return true; } catch (e) { console.warn('sendRaw send failed, queueing', e); pendingQueue.push(msg); return false; }
+      }
+
+      pendingQueue.push(msg);
+      if (!ws || ws.readyState === WebSocket.CLOSED) connect();
+      return false;
+    } catch (e) {
+      console.warn('sendRaw failed', e);
+      return false;
+    }
+  }
+
+  function sendVisibility(visible) {
+    return sendRaw({ type: 'visibility', visible: !!visible });
+  }
+
   // sendSignal: валидация + отправка (или буферизация)
   function sendSignal(to, payload) {
     // базовая валидация
@@ -164,6 +195,8 @@ export function createPresenceClient(opts = {}) {
     connectWhenAuth,
     connect,
     sendSignal,
+    sendRaw,
+    sendVisibility,
     on,
     isConnected: () => connected,
     raw: () => ws

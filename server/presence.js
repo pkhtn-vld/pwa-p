@@ -41,7 +41,7 @@ function attachPresence(httpServer, opts = {}) {
       return;
     }
 
-    ws._meta = { userKey, sessionId };
+    ws._meta = { userKey, sessionId, visible: true };
 
     if (userKey) {
       let set = clientsByUser.get(userKey);
@@ -79,6 +79,15 @@ function attachPresence(httpServer, opts = {}) {
       let msg;
       try { msg = JSON.parse(text); } catch (e) { return; }
 
+      if (msg && msg.type === 'visibility') {
+        // ожидаем { type: 'visibility', visible: true|false }
+        try {
+          ws._meta.visible = !!msg.visible;
+          // при изменении видимости можно опционально broadcastPresence();
+        } catch (e) { /* ignore */ }
+        return;
+      }
+
       if (msg.type === 'signal' && msg.to) {
 
         // валидация сообщений
@@ -96,19 +105,25 @@ function attachPresence(httpServer, opts = {}) {
         const targets = clientsByUser.get(toKey);
         let delivered = false;
         let openCount = 0;
+        let visibleOpenCount = 0;
 
         if (targets && targets.size > 0) {
           for (const t of targets) {
             try {
               if (t.readyState === WebSocket.OPEN) {
-                t.send(JSON.stringify({ type: 'signal', from: ws._meta.userKey, payload: msg.payload || null }));
                 openCount++;
+                // учитываем видимость клиента
+                const isVisible = Boolean(t._meta && t._meta.visible);
+                if (isVisible) {
+                  visibleOpenCount++;
+                  t.send(JSON.stringify({ type: 'signal', from: ws._meta.userKey, payload: msg.payload || null }));
+                }
               }
             } catch (e) {
               console.warn('Failed to send to a socket for', toKey, e && e.message);
             }
           }
-          if (openCount > 0) delivered = true;
+          if (visibleOpenCount  > 0) delivered = true;
         }
 
         console.log(`[signal] from=${ws._meta.userKey} to=${toKey} targets=${targets ? targets.size : 0} open=${openCount} delivered=${delivered}`);

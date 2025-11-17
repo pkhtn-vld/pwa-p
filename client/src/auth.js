@@ -9,9 +9,51 @@ export async function ensurePresenceClient() {
   pc = createPresenceClient();
   // Попытка подключиться немедленно, если уже есть сессия
   await pc.connectWhenAuth();
+
+  try {
+    // отправим текущее состояние (будет буферизовано, если ws ещё не открыт)
+    sendVisibilityState(pc, document.visibilityState === 'visible');
+
+    // слушаем изменения видимости
+    document.addEventListener('visibilitychange', () => {
+      const isVisible = document.visibilityState === 'visible';
+      sendVisibilityState(pc, isVisible);
+    }, { passive: true });
+
+    // pagehide — попытка отправить перед закрытием/сворачиванием
+    window.addEventListener('pagehide', () => {
+      try { sendVisibilityState(pc, false); } catch (e) { }
+    });
+
+    // опционально: beforeunload (меньше шансов успеха, но лучше попытаться)
+    window.addEventListener('beforeunload', () => {
+      try { sendVisibilityState(pc, false); } catch (e) { }
+    });
+  } catch (e) { console.warn('visibility hook failed', e); }
+
   setPresenceClient(pc);
   attachPresenceListeners(pc);
   return pc;
+}
+
+// функция отправки видимости
+function sendVisibilityState(pc, visible) {
+  try {
+    if (!pc) return;
+    if (typeof pc.sendVisibility === 'function') {
+      pc.sendVisibility(visible);
+      return;
+    }
+    // fallback: если нет sendVisibility — попробуем sendRaw or raw()
+    if (typeof pc.sendRaw === 'function') {
+      pc.sendRaw({ type: 'visibility', visible: !!visible });
+      return;
+    }
+    const ws = (pc.raw && pc.raw()) || null;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'visibility', visible: !!visible }));
+    }
+  } catch (e) { console.warn('sendVisibilityState failed', e); }
 }
 
 function attachPresenceListeners(p) {
