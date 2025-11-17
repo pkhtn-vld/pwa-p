@@ -141,10 +141,10 @@ async function checkSession() {
         if (label) label.style.display = 'none';
 
         const resultBlock = document.getElementById("result");
-        if (resultBlock) {
-          resultBlock.textContent = "✅ Авторизация по cookie!\nДобро пожаловать " + displayName;
-          setTimeout(() => { resultBlock.style.display = 'none'; }, 1000);
-        }
+        // if (resultBlock) {
+        //   resultBlock.textContent = "✅ Авторизация по cookie!\nДобро пожаловать " + displayName;
+        //   setTimeout(() => { resultBlock.style.display = 'none'; }, 1000);
+        // }
 
         // проверка подписки
         try {

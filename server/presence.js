@@ -5,8 +5,6 @@ function attachPresence(httpServer, opts = {}) {
   const clientsByUser = new Map();
 
   wss.on('connection', (ws, req) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-
     // подробное логирование WebSocket handshake
     try {
       console.log(`[WS CONNECT] ${new Date().toISOString()} path=${req.url} origin=${req.headers.origin || ''} cookie=${req.headers.cookie || ''} remote=${req.socket && req.socket.remoteAddress}`);
@@ -35,7 +33,7 @@ function attachPresence(httpServer, opts = {}) {
     let userKey = null;
     if (sessionId && typeof opts.getSessionById === 'function') {
       const s = opts.getSessionById(sessionId);
-      if (s) userKey = s.userKey;
+      if (s && s.userKey) userKey = String(s.userKey).toLowerCase();
     }
 
     if (!userKey) {
@@ -56,47 +54,74 @@ function attachPresence(httpServer, opts = {}) {
     ws.on('pong', () => ws.isAlive = true);
 
     ws.on('message', (raw) => {
-      let msg;
-      try { msg = JSON.parse(raw); } catch (e) { return; }
-
-      // защита от слишком большого пакета (пример 64KB):
-      if (typeof raw === 'string' && raw.length > 64 * 1024) {
-        try { ws.terminate(); } catch (e) { }
-        return;
+      // raw может быть Buffer или string
+      let text;
+      if (Buffer.isBuffer(raw)) {
+        // лимит в байтах — 64KB
+        if (raw.length > 64 * 1024) {
+          try { ws.terminate(); } catch (e) { }
+          return;
+        }
+        text = raw.toString('utf8');
+      } else {
+        if (typeof raw === 'string') {
+          if (raw.length > 64 * 1024) {
+            try { ws.terminate(); } catch (e) { }
+            return;
+          }
+          text = raw;
+        } else {
+          // непонятный тип — игнорируем
+          return;
+        }
       }
+
+      let msg;
+      try { msg = JSON.parse(text); } catch (e) { return; }
 
       if (msg.type === 'signal' && msg.to) {
 
         // валидация сообщений
         if (msg.payload && msg.payload.type === 'chat_message') {
-          const text = String(msg.payload.text || '');
-          if (text.length === 0 || text.length > 2000) {
-            // можно отправить клиенту ошибку или просто игнорировать
+          const textmsg = String(msg.payload.text || '');
+          if (textmsg.length === 0 || textmsg.length > 2000) {
             return;
           }
           // нормализуем: обрезаем, удаляем управляющие символы и т.п.
-          msg.payload.text = text.slice(0, 2000);
+          msg.payload.text = textmsg.slice(0, 2000);
         }
 
-        const targets = clientsByUser.get(msg.to);
+        // нормализуем ключ получателя
+        const toKey = String(msg.to || '').toLowerCase();
+        const targets = clientsByUser.get(toKey);
         let delivered = false;
-        if (targets) {
-          delivered = true;
+        let openCount = 0;
+
+        if (targets && targets.size > 0) {
           for (const t of targets) {
             try {
-              if (t.readyState === WebSocket.OPEN) t.send(JSON.stringify({ type: 'signal', from: ws._meta.userKey, payload: msg.payload || null }));
-            } catch (e) { /* ignore */ }
+              if (t.readyState === WebSocket.OPEN) {
+                t.send(JSON.stringify({ type: 'signal', from: ws._meta.userKey, payload: msg.payload || null }));
+                openCount++;
+              }
+            } catch (e) {
+              console.warn('Failed to send to a socket for', toKey, e && e.message);
+            }
           }
+          if (openCount > 0) delivered = true;
         }
+
+        console.log(`[signal] from=${ws._meta.userKey} to=${toKey} targets=${targets ? targets.size : 0} open=${openCount} delivered=${delivered}`);
+
         if (opts.onSignal) {
-          try { opts.onSignal(ws._meta.userKey, msg.to, msg.payload || null, delivered); } catch (e) { }
+          try { opts.onSignal(ws._meta.userKey, toKey, msg.payload || null, delivered); } catch (e) { /* ignore */ }
         }
       }
       else if (msg.type === 'heartbeat') {
         ws.isAlive = true;
       } else if (msg.type === 'list') {
         const online = Array.from(clientsByUser.keys());
-        try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'list', online })); } catch (e) {}
+        try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'list', online })); } catch (e) { }
       }
     });
 
@@ -127,7 +152,7 @@ function attachPresence(httpServer, opts = {}) {
     wss.clients.forEach(ws => {
       if (ws.isAlive === false) return ws.terminate();
       ws.isAlive = false;
-      try { ws.ping(() => {}); } catch (e) {}
+      try { ws.ping(() => { }); } catch (e) { }
     });
   }, 30000);
 
