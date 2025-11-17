@@ -185,11 +185,6 @@ if (btnLogin) {
         if (resultBlock) {
           localStorage.setItem('pwaUserName', displayName);
 
-          resultBlock.textContent = "✅ Авторизация успешна!\nДобро пожаловать " + escapeHtml(displayName);
-          setTimeout(() => {
-            resultBlock.style.display = 'none';
-          }, 1000);
-
           // проверим наличие подписки у текущего (аутентифицированного) пользователя
           try {
             // запрос сделаем с credentials: 'include' чтобы cookie-сессия использовалась
@@ -285,35 +280,24 @@ if (btnLogin) {
         if (resultBlock) {
           localStorage.setItem('pwaUserName', displayName);
 
-          resultBlock.textContent = "✅ Авторизация успешна!\nДобро пожаловать " + escapeHtml(displayName);
-          setTimeout(() => {
-            resultBlock.style.display = 'none';
-          }, 1000);
-
-          // проверим наличие подписки у текущего (аутентифицированного) пользователя
+          // проверим наличие действующей подписки у текущего (аутентифицированного) пользователя
           try {
-            // запрос сделаем с credentials: 'include' чтобы cookie-сессия использовалась
-            const r = await fetch('/has-subscription', { credentials: 'include' });
-            if (r.ok) {
-              const j = await r.json();
-              if (j && j.hasSubscription) {
-                // подписка уже есть — прячем кнопку
-                const el = document.getElementById('pushBtnServ');
-                if (el) el.style.display = 'none';
-              } else {
-                // нет подписки — показываем кнопку
-                const el = document.getElementById('pushBtnServ');
-                if (el) el.style.display = 'block';
-              }
-            } else {
-              // если запрос вернул 401 — не авторизован, показываем кнопку как fallback
+            const ok = await ensureServerHasCurrentSubscription();
+
+            // если ensureServerHasCurrentSubscription() вернул true — локальная и серверная подписки совпадают
+            if (ok === true) {
+              const el = document.getElementById('pushBtnServ');
+              if (el) el.style.display = 'none';
+              console.log('Push subscription OK — hiding push button');
+            }
+            // если ok !== true → есть проблема, нужно показать кнопку
+            else {
               const el = document.getElementById('pushBtnServ');
               if (el) el.style.display = 'block';
-              alert('Ошибка при выполнении запроса на подписку')
+              console.log('Push subscription mismatch or missing — showing push button');
             }
           } catch (e) {
-            alert('has-subscription check failed \n' + e);
-            // в случае ошибки по сети — отображаем кнопку (пользователь может захотеть подписаться)
+            console.warn('Subscription check failed', e);
             const el = document.getElementById('pushBtnServ');
             if (el) el.style.display = 'block';
           }
@@ -344,10 +328,40 @@ if (btnLogin) {
   });
 }
 
-// helper: простая эскейп-функция для вывода displayName в HTML
-function escapeHtml(str) {
-  if (!str) return '';
-  return str.replace(/[&<>"'`=\/]/g, function (s) {
-    return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','/':'&#x2F;','`':'&#x60;','=':'&#x3D;' })[s];
-  });
+async function ensureServerHasCurrentSubscription() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const localSub = await reg.pushManager.getSubscription(); // может быть null
+    // получим сохранённые endpoint'ы с сервера
+    const r = await fetch('/has-subscription', { credentials: 'include' });
+    if (!r.ok) return;
+    const j = await r.json();
+    const serverEndpoints = Array.isArray(j.endpoints) ? j.endpoints : [];
+
+    const localEndpoint = localSub && localSub.endpoint ? String(localSub.endpoint) : null;
+
+    // если у клиента есть подписка но её endpoint нет на сервере — отправим на /subscribe (обновим)
+    if (localEndpoint && serverEndpoints.indexOf(localEndpoint) === -1) {
+      console.log('Local subscription endpoint not found on server — sending to /subscribe');
+      await fetch('/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ subscription: localSub, userKey: (localStorage.getItem('pwaUserName')||'').trim().toLowerCase() })
+      });
+      return;
+    }
+
+    // если у клиента нет подписки, но сервер думает что подписка есть — вероятно клиент удалил подписку (переустановил PWA)
+    if (!localEndpoint && serverEndpoints.length > 0) {
+      console.log('Server has endpoints, but client has no subscription. Prompt user to re-subscribe or try to subscribe automatically.');
+      return;
+    }
+
+    // совпадает — всё ок
+    return true;
+  } catch (e) {
+    console.warn('ensureServerHasCurrentSubscription failed', e);
+  }
 }

@@ -304,10 +304,15 @@ app.post('/subscribe', async (req, res) => {
     const existing = subscriptionsByUser[userKey].find(x => x.endpoint === subscription.endpoint);
 
     if (!existing) {
-    subscriptionsByUser[userKey].push(subscription);
-    // сразу сохраняем на диск и в WebDAV
-    persistSubscriptions().catch(err => console.error('persistSubscriptions err', err));
-  }
+      subscriptionsByUser[userKey].push(subscription);
+      // дождёмся сохранения (чтобы не потерять подписку при рестарте)
+      try {
+        await persistSubscriptions();
+      } catch (err) {
+        console.error('persistSubscriptions err', err);
+      }
+    }
+
     console.log('Subscription saved for', userKey, 'totalSubs=', subscriptionsByUser[userKey].length);
     return res.status(201).json({ ok: true });
   } catch (e) {
@@ -605,7 +610,16 @@ app.get('/has-subscription', (req, res) => {
     if (!s) return res.status(401).json({ error: 'Not authenticated' });
     const userKey = (s.userKey || '').toString().toLowerCase();
     const subs = subscriptionsByUser[userKey] || [];
-    return res.json({ hasSubscription: Array.isArray(subs) && subs.length > 0 });
+
+    // вернём есть ли подписки и их endpoint'ы (без ключей)
+    const endpoints = subs
+      .filter(x => x && x.endpoint)
+      .map(x => x.endpoint);
+
+    return res.json({
+      hasSubscription: endpoints.length > 0,
+      endpoints
+    });
   } catch (e) {
     console.error('has-subscription error', e && e.stack || e);
     return res.status(500).json({ error: 'internal' });
