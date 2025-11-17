@@ -184,6 +184,15 @@ if (btnLogin) {
 
         localStorage.setItem('pwaUserName', displayName);
 
+        // создаём пару ключей и отсылаем публичный ключ на сервер
+        try {
+          console.log('[auth] post-register: ensure sodium keypair for', userKey);
+          await ensureKeypair(userKey);
+          console.log('[auth] sodium keypair ensured after registration for', userKey);
+        } catch (e) {
+          console.error('[auth] ensureKeypair after registration failed', e);
+        }
+
         // проверим наличие действующей подписки у текущего (аутентифицированного) пользователя
         try {
           const el = document.getElementById('pushBtnServ');
