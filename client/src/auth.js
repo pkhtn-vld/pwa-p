@@ -1,5 +1,5 @@
 import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
-import { loadAndRenderUsers, ensureTopBar, updateOnlineList, setPresenceClient, handleIncomingMessage } from "./userList.js";
+import { loadAndRenderUsers, ensureTopBar, updateOnlineList, setPresenceClient, handleIncomingMessage, showInAppToast } from "./userList.js";
 import { createPresenceClient } from "./presence.js";
 
 let pc = null;
@@ -21,19 +21,17 @@ function attachPresenceListeners(p) {
     updateOnlineList(online);
   });
   p.on('signal', (from, payload) => {
+    ///////
     try {
       if (payload && payload.type === 'chat_message') {
-        // передаём в UI (покажет в чате, если открыт)
-        handleIncomingMessage(from, payload);
-        // если чат с этим пользователем не открыт — покажем уведомление через service worker
-        if (Notification.permission === 'granted') {
-          navigator.serviceWorker.ready.then(reg => {
-            reg.showNotification('Новое сообщение', {
-              body: String(payload.text || '').slice(0, 200),
-              tag: 'chat-' + String(from || ''),
-              data: { from },
-            });
-          }).catch(()=>{});
+        try {
+          const handled = handleIncomingMessage(from, payload);
+          // если сообщение НЕ добавлено прямо в открытый чат — покажем in-app toast (не системную нотификацию)
+          if (!handled) {
+            showInAppToast(`Новое сообщение от ${from}`, String(payload.text || '').slice(0, 200), { from });
+          }
+        } catch (e) {
+          console.error('signal handler error', e);
         }
         return;
       }

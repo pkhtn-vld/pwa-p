@@ -1,6 +1,42 @@
 let presenceClient = null;
 let currentChat = null; // { userKey, displayName, messages: [] }
 let onlineSet = new Set();
+let currentOpenChatUserKey = null;
+
+// экспорт функции проверки
+export function isChatOpenWith(userKey) {
+  if (!userKey) return false;
+  return String(currentOpenChatUserKey || '').toLowerCase() === String(userKey || '').toLowerCase();
+}
+
+// Простейший in-app toast (замените на ваш компонент/стиль)
+export function showInAppToast(title, body, meta = {}) {
+  try {
+    const id = 'inapp-toast';
+    let el = document.getElementById(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.id = id;
+      el.style.position = 'fixed';
+      el.style.right = '12px';
+      el.style.bottom = '12px';
+      el.style.zIndex = 99999;
+      el.style.maxWidth = '90%';
+      el.style.padding = '10px 14px';
+      el.style.background = 'rgba(0,0,0,0.85)';
+      el.style.color = '#fff';
+      el.style.borderRadius = '8px';
+      el.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)';
+      document.body.appendChild(el);
+    }
+    el.textContent = `${title}: ${body}`;
+    el.style.display = 'block';
+    // исчезает через 4 сек
+    setTimeout(() => { try { el.style.display = 'none'; } catch (e) { } }, 4000);
+  } catch (e) {
+    console.log('toast fallback', title, body);
+  }
+}
 
 export function setPresenceClient(pc) {
   presenceClient = pc;
@@ -163,9 +199,11 @@ function renderUserList(users) {
   while (container.firstChild) container.removeChild(container.firstChild);
 
   users.forEach(u => {
+    const userKeyNorm = (u.userKey || '').toString().toLowerCase();
+
     const userDiv = document.createElement('div');
     userDiv.className = 'user-row';
-    userDiv.setAttribute('data-userkey', (u.userKey || '').toString().toLowerCase());
+    userDiv.setAttribute('data-userkey', userKeyNorm);
     userDiv.style.display = 'flex';
     userDiv.style.alignItems = 'center';
     userDiv.style.justifyContent = 'space-between';
@@ -231,7 +269,7 @@ function renderUserList(users) {
     msgBtn.style.fontSize = '18px';
     msgBtn.textContent = '✉️';
     msgBtn.addEventListener('click', () => {
-      openChatForUser({ userKey: u.userKey, displayName: u.displayName });
+      openChatForUser({ userKey: userKeyNorm, displayName: u.displayName || userKeyNorm });
     });
 
     // иконка звонка
@@ -243,12 +281,25 @@ function renderUserList(users) {
     callBtn.style.fontSize = '18px';
     callBtn.textContent = '📞';
     callBtn.addEventListener('click', () => {
-      alert('Инициация звонка пользователю: ' + u.displayName);
+      alert('Инициация звонка пользователю: ' + (u.displayName || userKeyNorm));
     });
+
+    // элемент бейджа непрочитанных
+    const unreadBadge = document.createElement('span');
+    unreadBadge.className = 'unread-badge';
+    unreadBadge.style.display = 'none';
+    unreadBadge.style.background = '#0b93f6';
+    unreadBadge.style.color = '#fff';
+    unreadBadge.style.borderRadius = '10px';
+    unreadBadge.style.padding = '2px 6px';
+    unreadBadge.style.fontSize = '12px';
+    unreadBadge.style.marginLeft = '8px';
+    unreadBadge.textContent = '●';
 
     right.appendChild(statusBtn);
     right.appendChild(msgBtn);
     right.appendChild(callBtn);
+    right.appendChild(unreadBadge);
 
     userDiv.appendChild(left);
     userDiv.appendChild(right);
@@ -265,8 +316,8 @@ export async function loadAndRenderUsers() {
       console.warn('Не удалось загрузить список пользователей:', r.status);
       return;
     }
-    const data = await r.json().catch(async (e)=> {
-      const txt = await r.text().catch(()=>null);
+    const data = await r.json().catch(async (e) => {
+      const txt = await r.text().catch(() => null);
       return null;
     });
     if (!data) return;
@@ -280,12 +331,12 @@ export async function loadAndRenderUsers() {
   }
 }
 
-function escapeHtml(str) {
-  if (!str) return '';
-  return String(str).replace(/[&<>"'`=\/]/g, function (s) {
-    return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','/':'&#x2F;','`':'&#x60;','=':'&#x3D;' })[s];
-  });
-}
+// function escapeHtml(str) {
+//   if (!str) return '';
+//   return String(str).replace(/[&<>"'`=\/]/g, function (s) {
+//     return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','/':'&#x2F;','`':'&#x60;','=':'&#x3D;' })[s];
+//   });
+// }
 
 // Chat UI
 function createChatOverlay() {
@@ -353,7 +404,7 @@ function createChatOverlay() {
   messages.style.flexDirection = 'column';
   messages.style.gap = '8px';
   messages.style.background = '#f7f7f7';
-  
+
   const inputWrap = document.createElement('div');
   inputWrap.style.display = 'flex';
   inputWrap.style.padding = '8px';
@@ -390,9 +441,29 @@ function createChatOverlay() {
   document.body.appendChild(overlay);
 }
 
-function openChatForUser({ userKey, displayName }) {
+// Экспортируем openChatForUser для вызовов извне
+export function openChatForUser({ userKey, displayName }) {
+  currentOpenChatUserKey = String(userKey || '').toLowerCase();
   createChatOverlay();
-  currentChat = { userKey: (userKey||'').toString().toLowerCase(), displayName: displayName || userKey, messages: [] };
+  const normalized = (userKey || '').toString().toLowerCase();
+  currentChat = { userKey: normalized, displayName: displayName || userKey, messages: [] };
+
+  // загрузим непрочитанные сообщения из localStorage, если есть
+  try {
+    const key = 'unread_' + normalized;
+    const prev = JSON.parse(localStorage.getItem(key) || '[]');
+    if (Array.isArray(prev) && prev.length > 0) {
+      prev.forEach(m => currentChat.messages.push({ outgoing: false, text: m.text, ts: m.ts || Date.now() }));
+      localStorage.removeItem(key);
+    }
+    // прячем бейдж в списке
+    const row = document.querySelector(`.user-row[data-userkey="${normalized}"]`);
+    if (row) {
+      const badge = row.querySelector('.unread-badge');
+      if (badge) badge.style.display = 'none';
+    }
+  } catch (e) { }
+
   document.getElementById('chatOverlay').style.display = 'flex';
   document.getElementById('chatTitle').textContent = currentChat.displayName;
 
@@ -435,7 +506,6 @@ function renderMessages() {
       row.style.color = '#111';
       row.style.borderBottomLeftRadius = '4px';
     }
-    // row.innerHTML = escapeHtml(m.text);
     row.textContent = m.text || '';
     out.appendChild(row);
   });
@@ -465,7 +535,7 @@ function sendChatMessage() {
 
 // для получения входящих сообщений из auth.js (presence listener) 
 export function handleIncomingMessage(fromUserKey, payload) {
-  if (!payload || payload.type !== 'chat_message') return;
+  if (!payload || payload.type !== 'chat_message') return false;
   const text = String(payload.text || '');
   const from = String(fromUserKey || '').toLowerCase();
 
@@ -473,15 +543,19 @@ export function handleIncomingMessage(fromUserKey, payload) {
   if (currentChat && currentChat.userKey === from) {
     currentChat.messages.push({ outgoing: false, text, ts: payload.ts || Date.now() });
     renderMessages();
-    return;
+    return true;
   }
 
-  // иначе — можно запомнить краткую историю и/или показать бейдж
-  // здесь просто создаём небольшую визуальную подсказку в списке пользователей
+  // иначе — показать визуальную подсказку в списке пользователей + сохранить в localStorage как unread
   const row = document.querySelector(`.user-row[data-userkey="${from}"]`);
   if (row) {
-    row.style.borderLeft = '4px solid #0b93f6';
-    setTimeout(() => { row.style.borderLeft = ''; }, 5000);
+    // пометить левой границей и показать бейдж
+    try {
+      const badge = row.querySelector('.unread-badge');
+      if (badge) badge.style.display = 'inline-block';
+      row.style.borderLeft = '4px solid #0b93f6';
+      setTimeout(() => { try { row.style.borderLeft = ''; } catch (e) { } }, 5000);
+    } catch (e) { }
   }
 
   // и сохраняем краткую непрочитанную запись
@@ -490,7 +564,9 @@ export function handleIncomingMessage(fromUserKey, payload) {
     const prev = JSON.parse(localStorage.getItem(key) || '[]');
     prev.push({ text: text.slice(0, 200), ts: Date.now() });
     localStorage.setItem(key, JSON.stringify(prev));
-  } catch (e) {}
+  } catch (e) { }
+
+  return false;
 }
 
 // безопасно очистить элемент
@@ -513,12 +589,13 @@ export function showResultBlock(resultBlock, lines, hideAfterMs) {
     }
   });
   if (hideAfterMs) {
-    setTimeout(() => { try { resultBlock.style.display = 'none'; } catch(e) {} }, hideAfterMs);
+    setTimeout(() => { try { resultBlock.style.display = 'none'; } catch (e) { } }, hideAfterMs);
   }
 }
 
 
 document.addEventListener('open_chat', (e) => {
+  ///////
   const from = e.detail && e.detail.from;
   if (!from) return;
   // найди displayName в списке пользователей или используем userKey

@@ -61,16 +61,22 @@ self.addEventListener('notificationclick', function (event) {
       }
     }
     // если открытых окон нет — открываем новое окно приложения
+    // если клиентов нет — откроем новое окно/страницу приложения
     if (clients.openWindow) {
+      if (from) {
+        // вы можете прикрепить query param чтобы сразу открыть чат (если реализовано)
+        return clients.openWindow('/'); 
+      }
       return clients.openWindow('/');
     }
   }));
 });
 
 self.addEventListener('push', event => {
+  ///////
   let data = {};
   try {
-    data = event.data && event.data.json ? event.data.json() : {};
+    data = event.data && typeof event.data.json === 'function' ? event.data.json() : {};
   } catch (e) {
     try { data = { body: event.data && event.data.text ? event.data.text() : '' }; } catch (ee) { data = {}; }
   }
@@ -79,21 +85,27 @@ self.addEventListener('push', event => {
     // Получим все открытые окна/вкладки PWA (включая неконтролируемые)
     const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
 
-    // --- Если есть хоть одно окно приложения — отправляем им сообщение и НЕ показываем нативную нотификацию ---
-    if (allClients && allClients.length > 0) {
-      // отправляем сообщение всем клиентам
-      for (const c of allClients) {
-        try { c.postMessage({ type: 'push', data }); } catch (e) { /* ignore */ }
-      }
-      // не показываем notification, потому что приложение открыто (даже если оно свернуто)
-      return;
+    // Отправим push-данные всем клиентам (они обновят UI или покажут in-app toast)
+    for (const c of allClients) {
+      try { c.postMessage({ type: 'push', data }); } catch (e) { /* ignore */ }
     }
 
-    // Если нет открытых окон — показываем нативную нотификацию
+    // Проверим, есть ли видимый клиент (visibilityState === 'visible')
+    let anyVisible = false;
+    for (const c of allClients) {
+      try {
+        if (c.visibilityState === 'visible') { anyVisible = true; break; }
+      } catch (e) { /* ignore */ }
+    }
+
+    // Если есть видимый клиент — НЕ показываем системную нотификацию (in-app toast достаточно)
+    if (anyVisible) return;
+
+    // В противном случае (нет видимых окон) — показываем нативную нотификацию
     const title = data.title || 'Новое сообщение';
     const options = {
       body: data.body || '',
-      data: data.data || {},
+      data: data.data || {}, // payload.data должен содержать { from, ... }
       tag: data.tag || ('chat-' + (data.data && data.data.from || Date.now())),
       renotify: true,
       icon: '/assets/icon-phone-192.png'

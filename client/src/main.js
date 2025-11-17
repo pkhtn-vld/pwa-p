@@ -1,4 +1,4 @@
-import { loadAndRenderUsers, ensureTopBar } from "./userList.js";
+import { loadAndRenderUsers, ensureTopBar, showInAppToast, isChatOpenWith } from "./userList.js";
 import { ensurePresenceClient } from './auth.js';
 import "../style.css";
 import "./auth.js";
@@ -11,37 +11,26 @@ if ('serviceWorker' in navigator) {
     .catch(err => console.error('Ошибка регистрации SW:', err));
 
 
-    navigator.serviceWorker.addEventListener('message', (ev) => {
+  navigator.serviceWorker.addEventListener('message', (ev) => {
+    ///////
     const msg = ev.data;
-    if (!msg || msg.type !== 'push') return;
-    const payload = msg.data || {};
-    // payload.data.from — от кого
-    // payload.payload — содержимое chat_message (если вы отправляете так)
-    // Логика: если сейчас открыт чат с payload.data.from -> добавить сообщение в UI
-    // иначе показать in-app toast (не системную нотификацию)
-    try {
-      handleIncomingPushFromSW(payload);
-    } catch (e) { console.warn('handleIncomingPushFromSW error', e && e.message); }
-  });
-}
+    if (!msg) return;
 
-// заглушка
-function handleIncomingPushFromSW(payload) {
-  const from = payload && payload.data && payload.data.from;
-  if (!from) {
-    // показать in-app toast с payload.body
-    // showInAppToast(payload.title || 'Новое сообщение', payload.body || '');
-    alert('Новое сообщение: ' + payload.body);
-    return;
-  }
-  // если открыт чат с from — вставляем сообщение, иначе — показать in-app toast
-  // if (isChatOpenWith(from)) {
-    // insertMessageToChat(from, payload);
-    alert('Новое сообщение от: ' + from + ': ' + payload.body);
-  // } else {
-    // showInAppToast(payload.title || 'Новое сообщение', payload.body || '');
-    // alert('Новое сообщение: ' + payload.body);
-  // }
+    if (msg.type === 'push') {
+      const payload = msg.data || {};
+      const from = payload && payload.data && payload.data.from;
+      if (from && isChatOpenWith(from)) return;
+      showInAppToast(payload.title || 'Новое сообщение', payload.body || '', payload.data || {});
+      return;
+    }
+
+    if (msg.type === 'open_chat') {
+      const from = msg.from;
+      if (!from) return;
+      document.dispatchEvent(new CustomEvent('open_chat', { detail: { from } }));
+      return;
+    }
+  });
 }
 
 // Проверка режима установки и сетевого статуса
@@ -114,22 +103,25 @@ async function subscribeToPush() {
   }
 }
 
-document.getElementById('pushBtnServ').addEventListener('click', async (e) => {
-  e.preventDefault();
+const pushBtn = document.getElementById('pushBtnServ');
+if (pushBtn) {
+  pushBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
 
-  const input = document.getElementById("userName");
-  const raw = input ? input.value : '';
-  const displayName = raw.trim();
+    const input = document.getElementById("userName");
+    const raw = input ? input.value : '';
+    const displayName = raw.trim();
 
-  if (displayName) {
-    localStorage.setItem('pwaUserName', displayName);
-    await subscribeToPush();
-    document.getElementById("login").disabled = false;
-  } else {
-    alert('Необходимо ввести имя пользователя')
-    return;
-  }
-});
+    if (displayName) {
+      localStorage.setItem('pwaUserName', displayName);
+      await subscribeToPush();
+      document.getElementById("login").disabled = false;
+    } else {
+      alert('Необходимо ввести имя пользователя')
+      return;
+    }
+  });
+}
 
 // блокируем двойной тап
 let lastTouchEnd = 0;
@@ -140,14 +132,6 @@ document.addEventListener("touchend", function (event) {
   }
   lastTouchEnd = now;
 }, false);
-
-// navigator.serviceWorker.addEventListener('message', (ev) => {
-//   const msg = ev.data;
-//   if (msg && msg.type === 'open_chat' && msg.from) {
-//     const from = msg.from;
-//     document.dispatchEvent(new CustomEvent('open_chat', { detail: { from } }));
-//   }
-// });
 
 async function checkSession() {
   try {
@@ -172,12 +156,6 @@ async function checkSession() {
         if (headerAuth) headerAuth.style.display = 'none';
         if (userInput) userInput.style.display = 'none';
         if (label) label.style.display = 'none';
-
-        const resultBlock = document.getElementById("result");
-        // if (resultBlock) {
-        //   resultBlock.textContent = "✅ Авторизация по cookie!\nДобро пожаловать " + displayName;
-        //   setTimeout(() => { resultBlock.style.display = 'none'; }, 1000);
-        // }
 
         // проверка подписки
         try {
