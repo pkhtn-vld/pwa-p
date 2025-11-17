@@ -141,13 +141,13 @@ document.addEventListener("touchend", function (event) {
   lastTouchEnd = now;
 }, false);
 
-navigator.serviceWorker.addEventListener('message', (ev) => {
-  const msg = ev.data;
-  if (msg && msg.type === 'open_chat' && msg.from) {
-    const from = msg.from;
-    document.dispatchEvent(new CustomEvent('open_chat', { detail: { from } }));
-  }
-});
+// navigator.serviceWorker.addEventListener('message', (ev) => {
+//   const msg = ev.data;
+//   if (msg && msg.type === 'open_chat' && msg.from) {
+//     const from = msg.from;
+//     document.dispatchEvent(new CustomEvent('open_chat', { detail: { from } }));
+//   }
+// });
 
 async function checkSession() {
   try {

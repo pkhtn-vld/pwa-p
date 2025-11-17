@@ -76,28 +76,20 @@ self.addEventListener('push', event => {
   }
 
   event.waitUntil((async () => {
-    // Получим все открытые окна/вкладки PWA
+    // Получим все открытые окна/вкладки PWA (включая неконтролируемые)
     const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
 
-    // Если есть открытые клиенты — отправим им push-данные (они решат, показывать ли UI/note)
+    // --- Если есть хоть одно окно приложения — отправляем им сообщение и НЕ показываем нативную нотификацию ---
     if (allClients && allClients.length > 0) {
-      // отметим, есть видимые клиенты
-      let anyVisible = false;
+      // отправляем сообщение всем клиентам
       for (const c of allClients) {
-        try {
-          // WindowClient имеет visibilityState: 'visible'|'hidden'
-          if (c.visibilityState === 'visible') anyVisible = true;
-        } catch (e) { }
-        // отправляем сообщение в клиент — пусть клиент решает, показывать in-app toast или обновлять чат
-        try { c.postMessage({ type: 'push', data }); } catch (e) { }
+        try { c.postMessage({ type: 'push', data }); } catch (e) { /* ignore */ }
       }
-
-      // Если хотя бы одно окно видно (пользователь взаимодействует) — НЕ показываем нативную нотификацию
-      if (anyVisible) return;
-      // иначе — все окна есть, но скрыты/минімізированы — продолжаем и покажем notification
+      // не показываем notification, потому что приложение открыто (даже если оно свернуто)
+      return;
     }
 
-    // Если нет открытых клиентов или все скрыты — показываем нотификацию
+    // Если нет открытых окон — показываем нативную нотификацию
     const title = data.title || 'Новое сообщение';
     const options = {
       body: data.body || '',
