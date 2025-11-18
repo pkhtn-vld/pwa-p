@@ -767,98 +767,60 @@ async function sendChatMessage() {
 }
 
 // для получения входящих сообщений из auth.js (presence listener) 
-export function handleIncomingMessage(fromUserKey, payload) {
+export async function handleIncomingMessage(fromUserKey, payload) {
   try {
     if (!payload || payload.type !== 'chat_message') return false;
     const from = String(fromUserKey || '').toLowerCase();
 
-    // лог приходящего сообщения (обрезаем длинную строку для читаемости)
-    try {
-      console.log('[incoming] received from=', from, 'payloadPreview=', JSON.stringify(payload).slice(0, 300));
-    } catch (e) { console.log('[incoming] received from=', from); }
-
     const me = (localStorage.getItem('pwaUserName') || '').trim();
-
-    // если сообщение зашифровано - асинхронно сохраним зашифрованный вариант
     const shouldMarkRead = !!(currentChat && currentChat.userKey === from);
-    if (payload.encrypted) {
-      (async () => {
-        try {
-          await saveMessageLocal({
-            from,
-            to: me,
-            text: payload.text,
-            encrypted: true,
-            ts: payload.ts || Date.now(),
-            meta: { deliveredVia: 'ws' },
-            read: shouldMarkRead
-          });
-          console.log('[incoming] saved encrypted message to IDB (from=', from, 'read=', !!shouldMarkRead, ')');
-        } catch (e) {
-          console.warn('[incoming] failed to save encrypted message to IDB', e && e.message ? e.message : e);
-        }
-      })();
-    } else {
-      (async () => {
-        try {
-          await saveMessageLocal({
-            from,
-            to: me,
-            text: String(payload.text || ''),
-            encrypted: false,
-            ts: payload.ts || Date.now(),
-            meta: { deliveredVia: 'ws' },
-            read: shouldMarkRead
-          });
-          console.log('[incoming] saved plaintext message to IDB (from=', from, 'read=', !!shouldMarkRead, ')');
-        } catch (e) {
-          console.warn('[incoming] failed to save plaintext message to IDB', e && e.message ? e.message : e);
-        }
-      })();
+
+    // сохраним и дождёмся записи
+    try {
+      await saveMessageLocal({
+        from,
+        to: me,
+        text: payload.encrypted ? payload.text : String(payload.text || ''),
+        encrypted: !!payload.encrypted,
+        ts: payload.ts || Date.now(),
+        meta: { deliveredVia: 'ws' },
+        read: shouldMarkRead
+      });
+    } catch (e) {
+      console.warn('[incoming] failed to save message to IDB', e);
     }
 
-    // Если открыт чат с этим пользователем — попытаемся расшифровать и отобразить.
+    // Если чат открыт — отрисуем (неблокирующе)
     if (currentChat && currentChat.userKey === from) {
-      // Запускаем async-дефракцию/отрисовку, но возвращаем true немедленно.
       (async () => {
         try {
           if (payload.encrypted) {
             try {
               const plain = await decryptOwn(payload.text);
-              console.log('[incoming] decrypted message from', from, '->', String(plain).slice(0, 200));
               currentChat.messages.push({ outgoing: false, text: plain, ts: payload.ts || Date.now() });
-              renderMessages();
             } catch (e) {
-              console.warn('[incoming] decryptOwn failed for message from', from, e && e.message ? e.message : e);
-              // оставить отображение заглушки
               currentChat.messages.push({ outgoing: false, text: '[Зашифровано]', ts: payload.ts || Date.now() });
-              renderMessages();
             }
           } else {
-            // plaintext
-            const plain = String(payload.text || '');
-            currentChat.messages.push({ outgoing: false, text: plain, ts: payload.ts || Date.now() });
-            renderMessages();
-            console.log('[incoming] displayed plaintext message from', from);
+            currentChat.messages.push({ outgoing: false, text: String(payload.text || ''), ts: payload.ts || Date.now() });
           }
-        } catch (e) {
-          console.error('[incoming] async handler failed', e && (e.stack || e));
-        }
+          renderMessages();
+        } catch (e) { console.error(e); }
       })();
-
-      return true; // handled by open chat UI
+      return true;
     }
 
+    // чат закрыт — теперь запись гарантированно в IDB -> обновим бейдж
     try {
-      // бейдж обновим из IDB (мы уже записали сообщение с read:false)
-      updateUnreadBadge(from);
-      // небольшой визуальный эффект — подсветка строки
+      await updateUnreadBadge(from);
       const row = document.querySelector(`.user-row[data-userkey="${from}"]`);
       if (row) {
         row.style.borderLeft = '4px solid #0b93f6';
         setTimeout(() => { try { row.style.borderLeft = ''; } catch (e) { } }, 3500);
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      console.warn('[incoming] updateUnreadBadge failed', e);
+    }
 
     return false;
   } catch (e) {
@@ -936,7 +898,7 @@ export function initSWMessageHandler() {
 //  - вычисляет from
 //  - формирует snippet (для бейджа) — если зашифровано -> '[Зашифровано]' иначе текст/тело
 //  - если чат открыт с from — ничего не показывает (чтобы не дублировать у клиента)
-function handleSWPush(payload) {
+async function handleSWPush(payload) {
   try {
     // Попробуем извлечь поле from
     const from =
@@ -979,15 +941,14 @@ function handleSWPush(payload) {
       return;
     }
 
-    // добавляем в unread (localStorage + обновление бейджа)
     try {
-      // SW уже записал сообщение в IndexedDB (read: false). Обновим бейдж по IDB.
-      updateUnreadBadge(normFrom).catch ? updateUnreadBadge(normFrom) : updateUnreadBadge(normFrom);
+      // ждем обновления бейджа на основе IDB
+      await updateUnreadBadge(normFrom);
     } catch (e) {
       console.warn('[SW->client] updateBadge failed', e);
     }
 
-    // Показываем в-app toast (коротко), данные 전달им как meta
+    // Показываем в-app toast (коротко)
     try {
       // красиво форматируем displayName если есть (пока — просто ucfirst)
       const label = String(normFrom).length > 0 ? (normFrom.charAt(0).toUpperCase() + normFrom.slice(1)) : 'Пользователь';

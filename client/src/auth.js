@@ -63,11 +63,11 @@ function attachPresenceListeners(p) {
     console.log('online list', online);
     updateOnlineList(online);
   });
-  p.on('signal', (from, payload) => {
+  p.on('signal', async (from, payload) => {
     try {
       if (payload && payload.type === 'chat_message') {
         try {
-          const handled = handleIncomingMessage(from, payload);
+          const handled = await handleIncomingMessage(from, payload);
           // если сообщение НЕ добавлено прямо в открытый чат — покажем in-app toast (не системную нотификацию)
           if (!handled) {
             showInAppToast(`Новое сообщение от ${from.charAt(0).toUpperCase() + from.slice(1)}`, { from });

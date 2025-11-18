@@ -110,6 +110,27 @@ self.addEventListener('push', event => {
   }
 
   event.waitUntil((async () => {
+
+    // Сохраняем payload в IndexedDB *всегда* — чтобы клиент мог потом получить историю и расшифровать.
+    // payload формат в сервере: { title, body, data: { from, payload } }
+    try {
+      const from = (data.data && data.data.from) || null;
+      const payload = (data.data && data.data.payload) || null;
+      const msgToSave = {
+        from,
+        to: null,
+        text: payload && payload.text ? payload.text : (data.body || ''),
+        encrypted: !!(payload && payload.encrypted),
+        ts: Date.now(),
+        meta: { via: 'push' },
+        read: false,
+      };
+      const ok = await saveToIDB(msgToSave);
+      console.log('[SW] saveToIDB for push returned', !!ok, 'from=', from);
+    } catch (e) {
+      console.warn('[SW] failed to save push payload to IDB', e && (e.stack || e));
+    }
+    
     try {
       // Получим все открытые окна/вкладки PWA (включая неконтролируемые)
       const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
@@ -117,26 +138,6 @@ self.addEventListener('push', event => {
       // Отправим push-данные всем клиентам (они обновят UI или покажут in-app toast)
       for (const c of allClients) {
         try { c.postMessage({ type: 'push', data }); } catch (e) { /* ignore */ }
-      }
-
-      // Сохраняем payload в IndexedDB *всегда* — чтобы клиент мог потом получить историю и расшифровать.
-      // payload формат в сервере: { title, body, data: { from, payload } }
-      try {
-        const from = (data.data && data.data.from) || null;
-        const payload = (data.data && data.data.payload) || null;
-        const msgToSave = {
-          from,
-          to: null,
-          text: payload && payload.text ? payload.text : (data.body || ''),
-          encrypted: !!(payload && payload.encrypted),
-          ts: Date.now(),
-          meta: { via: 'push' },
-          read: false,
-        };
-        const ok = await saveToIDB(msgToSave);
-        console.log('[SW] saveToIDB for push returned', !!ok, 'from=', from);
-      } catch (e) {
-        console.warn('[SW] failed to save push payload to IDB', e && (e.stack || e));
       }
 
       // Проверим, есть ли видимый клиент (visibilityState === 'visible')
