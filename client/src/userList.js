@@ -4,7 +4,9 @@ import {
   decryptOwn,
   saveMessageLocal,
   getMessagesWith,
-  cachePubkey
+  cachePubkey,
+  getLocalKeypair,
+  fetchAndCachePubkey
 } from './cryptoSodium.js';
 
 let presenceClient = null;
@@ -501,31 +503,89 @@ export function openChatForUser({ userKey, displayName }) {
 
   renderMessages();
 
-  // Асинхронно: загрузим историю из IndexedDB и подставим в currentChat.messages
-    (async () => {
+    // Асинхронно: загрузим историю из IndexedDB и подставим в currentChat.messages
+  (async () => {
     try {
       console.log('[chat] loading history for', normalized);
-      const rows = await getMessagesWith(normalized);
+      const rows = await getMessagesWith(normalized); // отсортировано по ts
       currentChat.messages = []; // заменим текущий буфер на содержимое IDB
+
+      // сгруппируем записи по key = `${ts}|${from}|${to}`
+      const groups = new Map();
       for (const r of rows) {
-        // r: { from, to, text, encrypted, ts, meta }
-        const outgoing = String(r.from || '').toLowerCase() === (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
+        const key = `${r.ts}|${String(r.from||'')}|${String(r.to||'')}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(r);
+      }
+
+      // упорядочим ключи по ts (численно)
+      const orderedKeys = Array.from(groups.keys()).sort((a, b) => {
+        const ta = Number(a.split('|')[0]) || 0;
+        const tb = Number(b.split('|')[0]) || 0;
+        return ta - tb;
+      });
+
+      const myKey = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
+
+      for (const key of orderedKeys) {
+        const bucket = groups.get(key) || [];
+        // предпочитаем локальную копию, если есть
+        let preferred = bucket.find(x => x.meta && x.meta.localCopy) || bucket[0];
+
+        // если preferred дешифровка не удалась, но в бакете есть локальная — попробуем её
         let textForUI = '';
-        if (r.encrypted) {
+        let decrypted = false;
+
+        if (preferred && preferred.encrypted) {
           try {
-            // попробуем расшифровать локально (если есть ключ)
-            const plain = await decryptOwn(r.text);
+            const plain = await decryptOwn(preferred.text);
             textForUI = plain;
-            console.log('[chat] decrypted history msg ts=', r.ts, 'from=', r.from, '->', String(plain).slice(0,120));
+            decrypted = true;
+            console.log('[chat] decrypted history msg ts=', preferred.ts, 'from=', preferred.from, '->', String(plain).slice(0,120));
           } catch (e) {
-            textForUI = '[Зашифровано]';
-            console.warn('[chat] cannot decrypt history msg ts=', r.ts, 'from=', r.from, e && e.message ? e.message : e);
+            console.warn('[chat] decrypt failed for preferred record ts=', preferred.ts, preferred.from, e && e.message ? e.message : e);
+            // попробуем найти альтернативную запись в той же группе (например локальную), если не выбранная
+            const alt = bucket.find(x => x !== preferred && x.encrypted && x.meta && x.meta.localCopy);
+            if (alt) {
+              try {
+                const plain2 = await decryptOwn(alt.text);
+                textForUI = plain2;
+                decrypted = true;
+                console.log('[chat] decrypted alternative history msg ts=', alt.ts, 'from=', alt.from);
+              } catch (ee) {
+                // не удалось и там
+                console.warn('[chat] alt decrypt also failed', ee && ee.message ? ee.message : ee);
+              }
+            }
           }
-        } else {
-          textForUI = String(r.text || '');
+        } else if (preferred) {
+          // plaintext stored
+          textForUI = String(preferred.text || '');
+          decrypted = true;
         }
 
-        currentChat.messages.push({ outgoing: !!outgoing, text: textForUI, ts: r.ts || Date.now() });
+        if (!decrypted) {
+          textForUI = '[Зашифровано]';
+          // Доп.диагностика: если это входящее к нам сообщение и decryptOwn не удался,
+          // проверим соответствие нашего локального pubkey и серверного pubkey (чтобы понять, не сменился ли ключ)
+          try {
+            if (String(preferred.to || '').toLowerCase() === myKey) {
+              // получим serverPub для myKey
+              const serverPub = await fetchAndCachePubkey(myKey); // пробуем получить и кешировать
+              const localKeys = await getLocalKeypair();
+              const localPub = localKeys && localKeys.publicKeyBase64 ? localKeys.publicKeyBase64 : null;
+              if (serverPub && localPub && serverPub !== localPub) {
+                console.warn('[chat] local public key differs from server public key — historical decryption impossible for messages encrypted to server key');
+                showInAppToast('Ключи изменены', 'Ваш локальный ключ не совпадает с серверным — старые сообщения не расшифруются.');
+              }
+            }
+          } catch (diagE) {
+            console.warn('[chat] diagnostic check failed', diagE);
+          }
+        }
+
+        const outgoing = String(preferred.from || '').toLowerCase() === myKey;
+        currentChat.messages.push({ outgoing: !!outgoing, text: textForUI, ts: preferred.ts || Date.now() });
       }
 
       // После загрузки истории покажем сообщения
@@ -593,40 +653,75 @@ async function sendChatMessage() {
 
   try {
     const recipient = currentChat.userKey;
-    const me = (localStorage.getItem('pwaUserName') || '').trim();
+    // используем userKey (нормализованный) как "me"
+    const me = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
 
     console.log('[send] preparing to send to=', recipient, 'textPreview=', text.slice(0,50));
 
     // получаем публичный ключ получателя (кеш/сервер)
-    const pub = await getPubkey(recipient);
-    if (!pub) {
+    const pubRecipient = await getPubkey(recipient);
+    if (!pubRecipient) {
       console.error('[send] no public key for', recipient);
       showInAppToast('Ошибка', 'Публичный ключ получателя не найден, отправка отменена');
       return;
     }
 
-    // шифруем
-    const cipherB64 = await encryptForPublicBase64(pub, text);
-    console.log('[send] encrypted message (base64 len=', (cipherB64||'').length, ')');
+    // получаем локальную пару (чтобы получить наш публичный ключ)
+    const localKeys = await getLocalKeypair();
+    if (!localKeys || !localKeys.publicKeyBase64) {
+      console.error('[send] no local sodium keypair present');
+      showInAppToast('Ошибка', 'Локальная пара ключей не найдена, попытайтесь повторно авторизоваться');
+      return;
+    }
+    const myPubB64 = localKeys.publicKeyBase64;
+
+    // шифруем два варианта:
+    //    - тот, что уйдёт получателю (зашифрован на recipient pub)
+    //    - локальная копия, зашифрованная на ваш собственный публичный ключ (для локального хранения)
+    const cipherForRecipient = await encryptForPublicBase64(pubRecipient, text);
+    const cipherForMe = await encryptForPublicBase64(myPubB64, text);
 
     const ts = Date.now();
-    const payload = { type: 'chat_message', encrypted: true, text: cipherB64, ts };
 
-    // сохраняем зашифрованную копию в IndexedDB (чтобы история всегда была в IDB)
+    // сохраним локальную копию (priority) — зашифрованную для нас (чтобы decryptOwn работал после рестарта)
     try {
-      await saveMessageLocal({ from: me, to: recipient, text: cipherB64, encrypted: true, ts, meta: { sentByMe: true } });
-      console.log('[send] saved encrypted message to IDB (sentByMe)', { to: recipient, ts });
+      await saveMessageLocal({
+        from: me,
+        to: recipient,
+        text: cipherForMe,
+        encrypted: true,
+        ts,
+        meta: { localCopy: true, sentByMe: true }
+      });
+      console.log('[send] saved local encrypted copy to IDB (sentByMe)', { to: recipient, ts });
     } catch (e) {
-      console.warn('[send] failed to save encrypted message to IDB', e && e.message ? e.message : e);
+      console.warn('[send] failed to save local encrypted copy to IDB', e && e.message ? e.message : e);
     }
+
+    // опционально: сохраним также копию, зашифрованную для получателя (remote copy)
+    //    Это может быть полезно для синхронизации/бэкапа. Флаг meta.remoteCopy отличает её.
+    // try {
+    //   await saveMessageLocal({
+    //     from: me,
+    //     to: recipient,
+    //     text: cipherForRecipient,
+    //     encrypted: true,
+    //     ts,
+    //     meta: { remoteCopy: true, sentByMe: true }
+    //   });
+    //   console.log('[send] saved remote encrypted copy to IDB (for sync)', { to: recipient, ts });
+    // } catch (e) {
+    //   console.warn('[send] failed to save remote encrypted copy to IDB', e && e.message ? e.message : e);
+    // }
 
     // отрисовываем plaintext локально (пользователь должен увидеть своё сообщение сразу)
     currentChat.messages.push({ outgoing: true, text, ts });
     renderMessages();
     inp.value = '';
 
-    // отправляем через presenceClient (может буферизоваться)
+    // отправляем через presenceClient (payload содержит зашифрованный для получателя текст)
     try {
+      const payload = { type: 'chat_message', encrypted: true, text: cipherForRecipient, ts };
       const sent = presenceClient.sendSignal(recipient, payload);
       console.log('[send] presenceClient.sendSignal returned', sent, 'recipient=', recipient);
     } catch (e) {
