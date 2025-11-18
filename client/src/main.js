@@ -1,8 +1,6 @@
 import { loadAndRenderUsers, ensureTopBar, initSWMessageHandler, initUnreadFromIDB } from "./userList.js";
 import { ensurePresenceClient } from './auth.js';
 import "../style.css";
-import "./userList.js";
-import "./auth.js";
 import "./presence.js";
 
 if ('serviceWorker' in navigator) {

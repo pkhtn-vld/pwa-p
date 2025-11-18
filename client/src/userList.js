@@ -169,22 +169,6 @@ export function updateUnreadBadge(userKey) {
 }
 
 /**
- * Обновить бейджи для всех user-row'ов (вызывается после renderUserList или при старте).
- * Возвращает Promise<void>.
- */
-export function updateAllBadges() {
-  try {
-    const rows = document.querySelectorAll('.user-row');
-    const ps = [];
-    rows.forEach(r => {
-      const userKey = r.getAttribute('data-userkey');
-      if (userKey) ps.push(updateUnreadBadge(userKey));
-    });
-    return Promise.all(ps).then(() => { /* done */ }).catch(() => { /* ignore */ });
-  } catch (e) { return Promise.resolve(); }
-}
-
-/**
  * Инициализация: сканируем IDB и сразу обновляем бейджи (вызов при старте приложения).
  * Возвращает Promise<void>.
  */
