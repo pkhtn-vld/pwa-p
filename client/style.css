@@ -396,3 +396,17 @@ button:hover {
   color: #666;
   background: transparent;
 }
+
+.msg-tick {
+  margin-right: 6px;
+  font-size: 12px;
+  opacity: 0.9;
+  display: inline-block;
+}
+
+.msg-row.outgoing .msg-tick {
+  color: rgba(255,255,255,0.9);
+}
+.msg-row.incoming .msg-tick {
+  color: rgba(0,0,0,0.55);
+}

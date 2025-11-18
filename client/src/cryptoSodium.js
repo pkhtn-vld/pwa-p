@@ -162,6 +162,31 @@ export async function decryptOwn(ciphertextBase64) {
   }
 }
 
+// функция для обновления записи сообщения в IDB
+export async function updateMessageDeliveryStatus(recipient, ts, status) {
+  try {
+    const db = await open();
+    const me = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
+    const all = await db.getAll(STORE_MESSAGES);
+    // найдём запись: from = me, to = recipient, ts = ts и meta.localCopy = true
+    const rec = all.find(r =>
+      String(r.from || '').toLowerCase() === me &&
+      String(r.to || '').toLowerCase() === String(recipient || '').toLowerCase() &&
+      Number(r.ts || 0) === Number(ts) &&
+      r.meta && r.meta.localCopy
+    );
+    if (!rec) return false;
+    rec.meta = rec.meta || {};
+    rec.meta.delivery = status; // 'pending'|'sent'|'read'|'failed'
+    await db.put(STORE_MESSAGES, rec);
+    console.log('[msg] updated delivery status in IDB', { to: recipient, ts, status });
+    return true;
+  } catch (e) {
+    console.warn('[msg] updateMessageDeliveryStatus failed', e && e.message ? e.message : e);
+    return false;
+  }
+}
+
 // saveMessageLocal(msg)
 // msg shape example:
 // { from, to, text, encrypted: true|false, ts: number, meta: {...}, read: true|false }
@@ -209,5 +234,6 @@ export default {
   saveMessageLocal,
   getMessagesWith,
   cachePubkey,
-  getCachedPubkey
+  getCachedPubkey,
+  updateMessageDeliveryStatus
 };

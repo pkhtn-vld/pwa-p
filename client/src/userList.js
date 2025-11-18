@@ -5,7 +5,8 @@ import {
   saveMessageLocal,
   getMessagesWith,
   getLocalKeypair,
-  fetchAndCachePubkey
+  fetchAndCachePubkey,
+  updateMessageDeliveryStatus
 } from './cryptoSodium.js';
 
 let presenceClient = null;
@@ -637,7 +638,13 @@ export function openChatForUser({ userKey, displayName }) {
         }
 
         const outgoing = String(preferred.from || '').toLowerCase() === myKey;
-        currentChat.messages.push({ outgoing: !!outgoing, text: textForUI, ts: preferred.ts || Date.now() });
+        const deliveryFlag = preferred && preferred.meta && preferred.meta.delivery ? preferred.meta.delivery : undefined;
+        currentChat.messages.push({
+          outgoing: !!outgoing,
+          text: textForUI,
+          ts: preferred.ts || Date.now(),
+          delivery: deliveryFlag
+        });
       }
 
       // После загрузки истории покажем сообщения
@@ -750,14 +757,15 @@ function renderMessages() {
     timeEl.className = 'msg-time';
     timeEl.textContent = formatTimeOnly(ts);
 
-    // опционально: можно поставить чек-иконку для исходящих (прочитано/отправлено)
+    // галочка
+    const tick = document.createElement('span');
+    tick.className = 'msg-tick';
     if (m.outgoing) {
-      const tick = document.createElement('span');
-      tick.className = 'msg-tick';
-      // пример: single tick — отправлено, double tick — прочитано. Заменяй логику по своему флагу.
-      // tick.textContent = m.read ? '✔✔' : '✔';
-      // пока оставим пустым; ты можешь подсунуть read-флаг при загрузке из IDB
-      tick.textContent = '';
+      // m.delivery может быть 'pending'|'sent'|'read'|'failed'
+      if (m.delivery === 'pending' || !m.delivery) tick.textContent = '⏳'; // или пусто
+      else if (m.delivery === 'sent') tick.textContent = '✔';
+      else if (m.delivery === 'read') tick.textContent = '✔✔';
+      else if (m.delivery === 'failed') tick.textContent = '❗';
       meta.appendChild(tick);
     }
 
@@ -828,7 +836,7 @@ async function sendChatMessage() {
         text: cipherForMe,
         encrypted: true,
         ts,
-        meta: { localCopy: true, sentByMe: true },
+        meta: { localCopy: true, sentByMe: true, delivery: 'pending' },
         read: true,
       });
       console.log('[send] saved local encrypted copy to IDB (sentByMe)', { to: recipient, ts });
@@ -837,18 +845,32 @@ async function sendChatMessage() {
     }
 
     // отрисовываем plaintext локально (пользователь должен увидеть своё сообщение сразу)
-    currentChat.messages.push({ outgoing: true, text, ts });
+    currentChat.messages.push({ outgoing: true, text, ts, delivery: 'pending' });
     renderMessages();
     inp.value = '';
+
+    let sent = false;
 
     // отправляем через presenceClient (payload содержит зашифрованный для получателя текст)
     try {
       const payload = { type: 'chat_message', encrypted: true, text: cipherForRecipient, ts };
-      const sent = presenceClient.sendSignal(recipient, payload);
+      sent = presenceClient.sendSignal(recipient, payload);
       console.log('[send] presenceClient.sendSignal returned', sent, 'recipient=', recipient);
     } catch (e) {
       console.error('[send] presenceClient.sendSignal threw', e && e.stack ? e.stack : e);
     }
+
+    // если sendSignal вернул true/ok — считаем доставленным (по протоколу presenceClient)
+    // обновим статус в UI и IDB
+    const newStatus = sent ? 'sent' : 'failed';
+
+    // обновим текущую память (найдём сообщение по ts)
+    const msg = currentChat.messages.slice().reverse().find(m => m.outgoing && Number(m.ts) === Number(ts));
+    if (msg) msg.delivery = newStatus;
+
+    // обновим в IDB
+    try { await updateMessageDeliveryStatus(recipient, ts, newStatus); } catch (e) { /* ignore */ }
+    renderMessages();
   } catch (e) {
     console.error('[send] failed', e && (e.stack || e));
     showInAppToast('Ошибка: Не удалось отправить сообщение');
@@ -858,8 +880,31 @@ async function sendChatMessage() {
 // для получения входящих сообщений из auth.js (presence listener) 
 export async function handleIncomingMessage(fromUserKey, payload) {
   try {
-    if (!payload || payload.type !== 'chat_message') return false;
+
+    if (!payload) return false;
     const from = String(fromUserKey || '').toLowerCase();
+
+    if (payload.type === 'chat_receipt') {
+      // payload: { ts, status }
+      const ts = payload.ts;
+      const status = payload.status; // 'delivered'|'read'|'failed'
+      // Обновим in-memory currentChat.messages если есть
+      if (currentChat && currentChat.userKey === from) {
+        for (let i = currentChat.messages.length - 1; i >= 0; i--) {
+          const m = currentChat.messages[i];
+          if (m.outgoing && Number(m.ts) === Number(ts)) {
+            m.delivery = status === 'read' ? 'read' : (status === 'delivered' ? 'sent' : status);
+            break;
+          }
+        }
+        renderMessages();
+      }
+      // Также обновим IDB
+      try { await updateMessageDeliveryStatus(from, ts, status === 'read' ? 'read' : (status === 'delivered' ? 'sent' : status)); } catch (e) { }
+      return true;
+    }
+
+    if (!payload || payload.type !== 'chat_message') return false;
 
     const me = (localStorage.getItem('pwaUserName') || '').trim();
     const shouldMarkRead = !!(currentChat && currentChat.userKey === from);
@@ -910,6 +955,19 @@ export async function handleIncomingMessage(fromUserKey, payload) {
     } catch (e) {
       console.warn('[incoming] updateUnreadBadge failed', e);
     }
+
+    try {
+      if (presenceClient && typeof presenceClient.sendSignal === 'function') {
+        const receiptStatus = shouldMarkRead ? 'read' : 'delivered'; // если чат открыт — read, иначе delivered
+        try {
+          const receiptPayload = { type: 'chat_receipt', ts: payload.ts, status: receiptStatus };
+          presenceClient.sendSignal(from, receiptPayload);
+          console.log('[receipt] sent', receiptPayload, 'to', from);
+        } catch (e) {
+          console.warn('[receipt] failed to send receipt', e && e.message ? e.message : e);
+        }
+      }
+    } catch (e) { /* ignore */ }
 
     return false;
   } catch (e) {
