@@ -18,121 +18,181 @@ function normKey(k) {
   return (String(k || '')).toLowerCase();
 }
 
-// Возвращает массив непрочитанных из localStorage (по ключу 'unread_<user>')
-// Формат: [{ text, ts }, ...]
-function getUnreadArray(userKey) {
-  try {
-    const key = 'unread_' + normKey(userKey);
-    const raw = localStorage.getItem(key) || '[]';
-    const arr = JSON.parse(raw);
-    if (Array.isArray(arr)) return arr;
-  } catch (e) { /* ignore */ }
-  return [];
-}
-
-// Сохраняет массив непрочитанных в localStorage
-function setUnreadArray(userKey, arr) {
-  try {
-    const key = 'unread_' + normKey(userKey);
-    localStorage.setItem(key, JSON.stringify(Array.isArray(arr) ? arr : []));
-  } catch (e) { console.warn('[unread] set failed', e); }
-}
-
-// Добавляет одну запись в unread (и обновляет бейдж на UI).
-// snippet — короткий текст для отображения в списке (может быть '[Зашифровано]')
-export function addUnread(userKey, snippet) {
-  try {
-    const k = normKey(userKey);
-    const arr = getUnreadArray(k);
-    arr.push({ text: String(snippet || '').slice(0, 200), ts: Date.now() });
-    setUnreadArray(k, arr);
-    updateUnreadBadge(k);
-  } catch (e) { console.warn('[unread] add failed', e); }
-}
-
-// Очищает unread для userKey: удаляет локальный storage и скрывает бейдж.
-// Также помечает сообщения в IndexedDB как прочитанные (read=true).
-export async function clearUnreadFor(userKey) {
-  try {
-    const k = normKey(userKey);
-    // удалить запись localStorage
-    try { localStorage.removeItem('unread_' + k); } catch (e) { /* ignore */ }
-
-    // обновить DOM бейдж
-    updateUnreadBadge(k);
-
-    // пометить соответствующие сообщения в IndexedDB как read=true
+// Открыть БД pwa-chat и вернуть Promise<db>
+function openChatDB() {
+  return new Promise((resolve, reject) => {
     try {
       const rq = indexedDB.open('pwa-chat', 1);
-      rq.onsuccess = function (e) {
+      rq.onupgradeneeded = function (e) {
         const db = e.target.result;
-        const tx = db.transaction('messages', 'readwrite');
-        const store = tx.objectStore('messages');
-        // проходим курсором и помечаем записи, относящиеся к этому чату
-        const req = store.openCursor();
-        req.onsuccess = function (ev) {
-          const cursor = ev.target.result;
-          if (!cursor) {
-            tx.oncomplete = function () { db.close(); };
-            return;
-          }
-          const rec = cursor.value;
-          const from = (rec.from || '').toLowerCase();
-          const to = (rec.to || '') ? String(rec.to).toLowerCase() : (rec.to === null ? null : '');
-          // логика: помечаем как прочитанные сообщения, если они от/к этому пользователю и ещё не read
-          if (!rec.read) {
-            if (from === k || to === k || (rec.meta && rec.meta.via === 'push' && from === k)) {
-              rec.read = true;
-              cursor.update(rec);
-            }
-          }
-          cursor.continue();
-        };
+        if (!db.objectStoreNames.contains('messages')) {
+          db.createObjectStore('messages', { keyPath: 'id', autoIncrement: true });
+        }
       };
-      rq.onerror = function () { /* ignore */ };
-    } catch (e) {
-      console.warn('[unread] failed to mark messages read in IDB', e);
-    }
-  } catch (e) {
-    console.warn('[unread] clear failed', e);
-  }
+      rq.onsuccess = function (e) { resolve(e.target.result); };
+      rq.onerror = function (e) { reject(e); };
+    } catch (err) { reject(err); }
+  });
 }
 
-// Обновляет DOM бейдж для указанного userKey, основываясь на localStorage 'unread_<user>'.
-// Показ: если count===0 -> скрыть; иначе показать синюю круглую метку с белым числом.
-// Ограничение: если count > 99 -> показываем '99+'.
+/**
+ * Посчитать количество непрочитанных сообщений от userKey
+ * Условие непрочитанного: rec.read !== true && (
+ *    (rec.to === me && rec.from === userKey) ||
+ *    (rec.meta && rec.meta.via === 'push' && rec.from === userKey)
+ * )
+ * Возвращает Promise<number>
+ */
+function countUnreadFor(userKey) {
+  return new Promise(async (resolve) => {
+    try {
+      const me = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
+      const k = normKey(userKey);
+      const db = await openChatDB();
+      const tx = db.transaction('messages', 'readonly');
+      const store = tx.objectStore('messages');
+      const req = store.openCursor();
+      let cnt = 0;
+      req.onsuccess = function (ev) {
+        const cursor = ev.target.result;
+        if (!cursor) {
+          db.close();
+          resolve(cnt);
+          return;
+        }
+        const rec = cursor.value;
+        const from = (rec.from || '').toLowerCase();
+        const to = rec.to ? String(rec.to).toLowerCase() : (rec.to === null ? null : '');
+        const viaPush = rec.meta && rec.meta.via === 'push';
+        const readFlag = !!rec.read;
+        if (!readFlag) {
+          if ((to && me && to === me && from === k) || (viaPush && from === k)) {
+            cnt++;
+          }
+        }
+        cursor.continue();
+      };
+      req.onerror = function () { db.close(); resolve(0); };
+    } catch (e) {
+      console.warn('[unread] countUnreadFor failed', e);
+      resolve(0);
+    }
+  });
+}
+
+/**
+ * Пометить все сообщения для userKey как прочитанные (read=true).
+ * Помечаем записи, где (from === userKey && to === me) || (meta.via==='push' && from === userKey)
+ * Возвращает Promise<void>
+ */
+export function markAllReadFor(userKey) {
+  return new Promise(async (resolve) => {
+    try {
+      const me = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
+      const k = normKey(userKey);
+      const db = await openChatDB();
+      const tx = db.transaction('messages', 'readwrite');
+      const store = tx.objectStore('messages');
+      const req = store.openCursor();
+      req.onsuccess = function (ev) {
+        const cursor = ev.target.result;
+        if (!cursor) {
+          tx.oncomplete = function () { db.close(); resolve(); };
+          return;
+        }
+        const rec = cursor.value;
+        const from = (rec.from || '').toLowerCase();
+        const to = rec.to ? String(rec.to).toLowerCase() : (rec.to === null ? null : '');
+        const viaPush = rec.meta && rec.meta.via === 'push';
+        if (!rec.read) {
+          if ((to && me && to === me && from === k) || (viaPush && from === k)) {
+            rec.read = true;
+            cursor.update(rec);
+          }
+        }
+        cursor.continue();
+      };
+      req.onerror = function () { db.close(); resolve(); };
+    } catch (e) {
+      console.warn('[unread] markAllReadFor failed', e);
+      resolve();
+    }
+  });
+}
+
+// DOM-обновления бейджа (на основе IDB)
+
+/**
+ * Обновляет бейдж для одного userKey, считая из IDB.
+ * Возвращает Promise<void>.
+ */
 export function updateUnreadBadge(userKey) {
   try {
     const k = normKey(userKey);
-    const cnt = getUnreadArray(k).length || 0;
     const row = document.querySelector(`.user-row[data-userkey="${k}"]`);
-    if (!row) return;
+    if (!row) return Promise.resolve();
     const badge = row.querySelector('.unread-badge');
-    if (!badge) return;
+    if (!badge) return Promise.resolve();
 
-    if (cnt <= 0) {
-      badge.style.display = 'none';
-      badge.textContent = '';
-      badge.setAttribute('aria-hidden', 'true');
-    } else {
-      badge.style.display = 'inline-block';
+    // ставим прелоад (скрытый) — затем асинхронно обновим
+    badge.style.display = 'none';
+    badge.textContent = '';
 
-      const display = cnt > 99 ? '99+' : String(cnt);
-      badge.textContent = display;
-      badge.style.background = '#0b93f6';
-      badge.style.color = '#fff';
-      badge.style.borderRadius = '999px';
-      badge.style.padding = '2px 8px';
-      badge.style.fontSize = '12px';
-      badge.style.lineHeight = '1';
-      badge.style.minWidth = '24px';
-      badge.style.textAlign = 'center';
-      badge.style.boxSizing = 'border-box';
-      badge.style.display = 'inline-block';
-      badge.setAttribute('aria-hidden', 'false');
-    }
+    return countUnreadFor(k).then(cnt => {
+      if (!badge) return;
+      if (cnt <= 0) {
+        badge.style.display = 'none';
+        badge.textContent = '';
+        badge.setAttribute('aria-hidden', 'true');
+      } else {
+        badge.style.display = 'inline-block';
+        const display = cnt > 99 ? '99+' : String(cnt);
+        badge.textContent = display;
+        badge.style.background = '#0b93f6';
+        badge.style.color = '#fff';
+        badge.style.borderRadius = '999px';
+        badge.style.padding = '2px 8px';
+        badge.style.fontSize = '12px';
+        badge.style.lineHeight = '1';
+        badge.style.minWidth = '24px';
+        badge.style.textAlign = 'center';
+        badge.style.boxSizing = 'border-box';
+        badge.setAttribute('aria-hidden', 'false');
+      }
+    }).catch(err => {
+      console.warn('[unread] updateUnreadBadge count failed', err);
+    });
   } catch (e) {
-    console.warn('[unread] update badge failed', e);
+    console.warn('[unread] updateUnreadBadge failed', e);
+    return Promise.resolve();
+  }
+}
+
+/**
+ * Обновить бейджи для всех user-row'ов (вызывается после renderUserList или при старте).
+ * Возвращает Promise<void>.
+ */
+export function updateAllBadges() {
+  try {
+    const rows = document.querySelectorAll('.user-row');
+    const ps = [];
+    rows.forEach(r => {
+      const userKey = r.getAttribute('data-userkey');
+      if (userKey) ps.push(updateUnreadBadge(userKey));
+    });
+    return Promise.all(ps).then(() => { /* done */ }).catch(() => { /* ignore */ });
+  } catch (e) { return Promise.resolve(); }
+}
+
+/**
+ * Инициализация: сканируем IDB и сразу обновляем бейджи (вызов при старте приложения).
+ * Возвращает Promise<void>.
+ */
+export async function initUnreadFromIDB() {
+  try {
+    await updateAllBadges();
+  } catch (e) {
+    console.warn('[unread] initUnreadFromIDB error', e);
   }
 }
 
@@ -463,7 +523,7 @@ function createChatOverlay() {
   back.addEventListener('click', closeChat);
 
   const titleWrap = document.createElement('div');
-  top.id = 'titleWrap';
+  titleWrap.id = 'titleWrap';
 
   const title = document.createElement('div');
   title.id = 'chatTitle';
@@ -539,16 +599,12 @@ export function openChatForUser({ userKey, displayName }) {
   const normalized = (userKey || '').toString().toLowerCase();
   currentChat = { userKey: normalized, displayName: displayName || userKey, messages: [] };
 
-  // загрузим непрочитанные сообщения из localStorage, если есть
-   try {
-    const key = 'unread_' + normalized;
-    const prev = JSON.parse(localStorage.getItem(key) || '[]');
-    if (Array.isArray(prev) && prev.length > 0) {
-      prev.forEach(m => currentChat.messages.push({ outgoing: false, text: m.text, ts: m.ts || Date.now() }));
-      localStorage.removeItem(key);
-    }
-    // прячем бейдж в списке (теперь через clearUnreadFor)
-    clearUnreadFor(normalized).catch(() => { /* ignore */ });
+  // Пометим все сообщения этого чата как прочитанные (и обновим бейдж)
+  try {
+    // это асинхронно: пометим в IDB и затем обновим DOM бейдж
+    markAllReadFor(normalized).then(() => {
+      updateUnreadBadge(normalized);
+    }).catch(() => { /* ignore */ });
   } catch (e) { }
 
   document.getElementById('chatOverlay').style.display = 'flex';
@@ -747,7 +803,8 @@ async function sendChatMessage() {
         text: cipherForMe,
         encrypted: true,
         ts,
-        meta: { localCopy: true, sentByMe: true }
+        meta: { localCopy: true, sentByMe: true },
+        read: true,
       });
       console.log('[send] saved local encrypted copy to IDB (sentByMe)', { to: recipient, ts });
     } catch (e) {
@@ -787,22 +844,37 @@ export function handleIncomingMessage(fromUserKey, payload) {
     const me = (localStorage.getItem('pwaUserName') || '').trim();
 
     // если сообщение зашифровано - асинхронно сохраним зашифрованный вариант
+    const shouldMarkRead = !!(currentChat && currentChat.userKey === from);
     if (payload.encrypted) {
-      // стартуем асинхронное сохранение (не await'им)
       (async () => {
         try {
-          await saveMessageLocal({ from, to: me, text: payload.text, encrypted: true, ts: payload.ts || Date.now(), meta: { deliveredVia: 'ws' } });
-          console.log('[incoming] saved encrypted message to IDB (from=', from, ')');
+          await saveMessageLocal({
+            from,
+            to: me,
+            text: payload.text,
+            encrypted: true,
+            ts: payload.ts || Date.now(),
+            meta: { deliveredVia: 'ws' },
+            read: shouldMarkRead
+          });
+          console.log('[incoming] saved encrypted message to IDB (from=', from, 'read=', !!shouldMarkRead, ')');
         } catch (e) {
           console.warn('[incoming] failed to save encrypted message to IDB', e && e.message ? e.message : e);
         }
       })();
     } else {
-      // plaintext: сохраняем тоже (compat)
       (async () => {
         try {
-          await saveMessageLocal({ from, to: me, text: String(payload.text || ''), encrypted: false, ts: payload.ts || Date.now(), meta: { deliveredVia: 'ws' } });
-          console.log('[incoming] saved plaintext message to IDB (from=', from, ')');
+          await saveMessageLocal({
+            from,
+            to: me,
+            text: String(payload.text || ''),
+            encrypted: false,
+            ts: payload.ts || Date.now(),
+            meta: { deliveredVia: 'ws' },
+            read: shouldMarkRead
+          });
+          console.log('[incoming] saved plaintext message to IDB (from=', from, 'read=', !!shouldMarkRead, ')');
         } catch (e) {
           console.warn('[incoming] failed to save plaintext message to IDB', e && e.message ? e.message : e);
         }
@@ -841,10 +913,9 @@ export function handleIncomingMessage(fromUserKey, payload) {
       return true; // handled by open chat UI
     }
 
-    // чат закрыт — отметим в списке пользователей и запомним краткую запись (unread) в localStorage
     try {
-      const snippet = payload.encrypted ? '[Зашифровано]' : String(payload.text || '');
-      addUnread(from, snippet);
+      // бейдж обновим из IDB (мы уже записали сообщение с read:false)
+      updateUnreadBadge(from);
       // небольшой визуальный эффект — подсветка строки
       const row = document.querySelector(`.user-row[data-userkey="${from}"]`);
       if (row) {
@@ -853,7 +924,6 @@ export function handleIncomingMessage(fromUserKey, payload) {
       }
     } catch (e) { /* ignore */ }
 
-    // сохраняем краткую непрочитанную запись в localStorage (addUnread уже сделал это)
     return false;
   } catch (e) {
     console.error('[incoming] handler error', e && (e.stack || e));
@@ -888,7 +958,6 @@ export function showResultBlock(resultBlock, lines, hideAfterMs) {
 
 // Инициализатор обработчика postMessage от service-worker.
 // После вызова будет централизованно обрабатываться:
-//  - сообщения типа { type: 'push', data: ... }  -> addUnread + in-app toast (если чат не открыт)
 //  - сообщения типа { type: 'open_chat', from } -> диспатчим событие open_chat (и открытие чата)
 // Вызывать один раз при старте приложения (например после регистрации SW в main.js).
 export function initSWMessageHandler() {
@@ -931,7 +1000,6 @@ export function initSWMessageHandler() {
 //  - вычисляет from
 //  - формирует snippet (для бейджа) — если зашифровано -> '[Зашифровано]' иначе текст/тело
 //  - если чат открыт с from — ничего не показывает (чтобы не дублировать у клиента)
-//  - иначе: addUnread(from, snippet), updateUnreadBadge(from), showInAppToast(...)
 function handleSWPush(payload) {
   try {
     // Попробуем извлечь поле from
@@ -977,10 +1045,10 @@ function handleSWPush(payload) {
 
     // добавляем в unread (localStorage + обновление бейджа)
     try {
-      addUnread(normFrom, snippet);
-      updateUnreadBadge(normFrom);
+      // SW уже записал сообщение в IndexedDB (read: false). Обновим бейдж по IDB.
+      updateUnreadBadge(normFrom).catch ? updateUnreadBadge(normFrom) : updateUnreadBadge(normFrom);
     } catch (e) {
-      console.warn('[SW->client] addUnread/updateBadge failed', e);
+      console.warn('[SW->client] updateBadge failed', e);
     }
 
     // Показываем в-app toast (коротко), данные 전달им как meta

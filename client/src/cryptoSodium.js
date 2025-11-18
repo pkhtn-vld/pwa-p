@@ -162,14 +162,31 @@ export async function decryptOwn(ciphertextBase64) {
   }
 }
 
-// messages store
 // saveMessageLocal(msg)
 // msg shape example:
-// { from, to, text, encrypted: true|false, ts: number, meta: {...} }
+// { from, to, text, encrypted: true|false, ts: number, meta: {...}, read: true|false }
 export async function saveMessageLocal(msg) {
   const db = await open();
-  await db.add(STORE_MESSAGES, Object.assign({ ts: Date.now() }, msg));
-  console.log('[msg] saved to IDB', { from: msg.from, to: msg.to, encrypted: !!msg.encrypted, ts: msg.ts || Date.now() });
+
+  // Нормализуем поля, выставляем ts и default для read.
+  const normalized = {
+    from: (msg.from == null) ? null : String(msg.from).toLowerCase(),
+    to: (msg.to == null) ? null : String(msg.to).toLowerCase(),
+    text: msg.text,
+    encrypted: !!msg.encrypted,
+    ts: msg.ts || Date.now(),
+    meta: (msg.meta && typeof msg.meta === 'object') ? msg.meta : {},
+    read: !!msg.read // по умолчанию false
+  };
+
+  try {
+    await db.add(STORE_MESSAGES, normalized);
+    console.log('[msg] saved to IDB', { from: normalized.from, to: normalized.to, encrypted: normalized.encrypted, ts: normalized.ts, read: normalized.read });
+  } catch (e) {
+    // Возможны случаи, когда добавление провалилось (ретрай/логика)
+    console.warn('[msg] save to IDB failed', e && e.message ? e.message : e);
+    throw e;
+  }
 }
 
 // getMessagesWith(userKey) - вернуть все сообщения с/к userKey, отсортированные по ts

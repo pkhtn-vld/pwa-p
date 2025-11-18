@@ -1,9 +1,8 @@
-import { loadAndRenderUsers, ensureTopBar, initSWMessageHandler } from "./userList.js";
+import { loadAndRenderUsers, ensureTopBar, initSWMessageHandler, initUnreadFromIDB } from "./userList.js";
 import { ensurePresenceClient } from './auth.js';
 import "../style.css";
 import "./auth.js";
 import "./presence.js";
-import "./userList.js";
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
@@ -159,6 +158,8 @@ async function checkSession() {
         ensureTopBar(displayName);
         await ensurePresenceClient();
         await loadAndRenderUsers();
+        // инициализируем бейджи из IDB
+        try { await initUnreadFromIDB(); } catch (e) { /* ignore */ }
       }
     }
   } catch (err) {
