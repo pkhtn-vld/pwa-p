@@ -46,7 +46,7 @@ function openChatDB() {
 function countUnreadFor(userKey) {
   return new Promise(async (resolve) => {
     try {
-      const me = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
+      const me = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
       const k = normKey(userKey);
       const db = await openChatDB();
       const tx = db.transaction('messages', 'readonly');
@@ -88,7 +88,7 @@ function countUnreadFor(userKey) {
 export function markAllReadFor(userKey) {
   return new Promise(async (resolve) => {
     try {
-      const me = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
+      const me = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
       const k = normKey(userKey);
       const db = await openChatDB();
       const tx = db.transaction('messages', 'readwrite');
@@ -577,7 +577,7 @@ export function openChatForUser({ userKey, displayName }) {
         return ta - tb;
       });
 
-      const myKey = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
+      const myKey = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
 
       for (const key of orderedKeys) {
         const bucket = groups.get(key) || [];
@@ -706,7 +706,7 @@ async function sendChatMessage() {
   try {
     const recipient = currentChat.userKey;
     // используем userKey (нормализованный) как "me"
-    const me = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
+    const me = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
 
     console.log('[send] preparing to send to=', recipient, 'textPreview=', text.slice(0, 50));
 
