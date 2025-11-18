@@ -434,7 +434,11 @@ export async function loadAndRenderUsers() {
     if (!data) return;
     if (data && Array.isArray(data.users)) {
       renderUserList(data.users);
-      updateAllBadges();
+      try {
+        await initUnreadFromIDB();
+      } catch (e) {
+        console.warn('[loadAndRenderUsers] initUnreadFromIDB failed', e);
+      }
     } else {
       // неожиданный формат
     }
@@ -969,11 +973,3 @@ document.addEventListener('open_chat', (e) => {
   const displayName = row ? (row.querySelector('div').textContent || from) : from;
   openChatForUser({ userKey: from, displayName });
 });
-
-// При старте приложения — инициализируем unread со значений в IDB (если client не получил postMessage)
-try {
-  // даём другим модулям возможность записать pwaUserKey в localStorage до вызова этой функции
-  setTimeout(() => {
-    initUnreadFromIDB();
-  }, 300);
-} catch (e) { /* ignore */ }
