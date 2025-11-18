@@ -191,54 +191,6 @@ export function updateAllBadges() {
   } catch (e) { /* ignore */ }
 }
 
-// При старте приложения: сканируем IndexedDB и инициализируем localStorage unread,
-// если клиент не получил postMessage от SW (кейс: пользователь открыл приложение вручную).
-// Подсчитываем все сообщения с read !== true и meta.via==='push' или to===me -> формируем unread_<from>.
-export async function initUnreadFromIDB() {
-  try {
-    const me = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
-    const rq = indexedDB.open('pwa-chat', 1);
-    rq.onsuccess = function (e) {
-      const db = e.target.result;
-      const tx = db.transaction('messages', 'readonly');
-      const store = tx.objectStore('messages');
-      const req = store.openCursor();
-      const accum = {}; // accum[from] = array of snippets
-      req.onsuccess = function (ev) {
-        const cursor = ev.target.result;
-        if (!cursor) {
-          // записываем в localStorage и обновляем бейджи
-          Object.keys(accum).forEach(k => {
-            setUnreadArray(k, accum[k]);
-          });
-          // обновим все бейджи в DOM
-          updateAllBadges();
-          db.close();
-          return;
-        }
-        const rec = cursor.value;
-        const readFlag = !!rec.read;
-        const from = (rec.from || '').toLowerCase();
-        const to = rec.to ? String(rec.to).toLowerCase() : (rec.to === null ? null : '');
-        const viaPush = rec.meta && rec.meta.via === 'push';
-        // условие: если сообщение не прочитано и оно адресовано нам или пришло через push (кейс оффлайн)
-        if (!readFlag) {
-          if ((to && me && to === me) || viaPush) {
-            if (!accum[from]) accum[from] = [];
-            const snippet = rec.encrypted ? '[Зашифровано]' : String(rec.text || '');
-            accum[from].push({ text: snippet.slice(0, 200), ts: rec.ts || Date.now() });
-          }
-        }
-        cursor.continue();
-      };
-      req.onerror = function () { db.close(); };
-    };
-    rq.onerror = function () { /* ignore */ };
-  } catch (e) {
-    console.warn('[unread] initFromIDB error', e);
-  }
-}
-
 // экспорт функции проверки
 export function isChatOpenWith(userKey) {
   if (!userKey) return false;

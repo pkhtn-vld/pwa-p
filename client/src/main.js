@@ -1,7 +1,6 @@
+import "../style.css";
 import { loadAndRenderUsers, ensureTopBar, initSWMessageHandler, initUnreadFromIDB } from "./userList.js";
 import { ensurePresenceClient } from './auth.js';
-import "../style.css";
-import "./presence.js";
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
