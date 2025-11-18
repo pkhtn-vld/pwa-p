@@ -661,32 +661,117 @@ function closeChat() {
   currentChat = null;
 }
 
+function isSameDay(tsA, tsB) {
+  if (!tsA || !tsB) return false;
+  const a = new Date(Number(tsA));
+  const b = new Date(Number(tsB));
+  return a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+}
+
+function isYesterday(ts) {
+  const d = new Date(Number(ts));
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  return d.getFullYear() === yesterday.getFullYear() &&
+    d.getMonth() === yesterday.getMonth() &&
+    d.getDate() === yesterday.getDate();
+}
+
+// Возвращает строку типа "12:07"
+function formatTimeOnly(ts) {
+  const d = new Date(Number(ts));
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return hh + ':' + mm;
+}
+
+// Возвращает заголовок даты как в телеграме: "Сегодня", "Вчера", или "1 нояб. 2025"
+function formatDateHeader(ts) {
+  if (!ts) return '';
+  if (isSameDay(ts, Date.now())) return 'Сегодня';
+  if (isYesterday(ts)) return 'Вчера';
+  const d = new Date(Number(ts));
+
+  // компактный формат: "01 нояб. 2025" (локаль берём из браузера)
+  try {
+    const locale = navigator.language || 'ru-RU';
+    // получаем день и короткое название месяца
+    const day = d.getDate();
+    const month = d.toLocaleString(locale, { month: 'short' });
+    const year = d.getFullYear();
+    return `${day} ${month} ${year}`;
+  } catch (e) {
+    return d.toLocaleDateString();
+  }
+}
+
+
 function renderMessages() {
   const out = document.getElementById('chatMessages');
   if (!out) return;
-  // используем безопасное очищение
+  // очищаем
   while (out.firstChild) out.removeChild(out.firstChild);
-  if (!currentChat) return;
+  if (!currentChat || !Array.isArray(currentChat.messages)) return;
+
+  let lastTs = null;
+
   currentChat.messages.forEach(m => {
-    const row = document.createElement('div');
-    row.style.maxWidth = '80%';
-    row.style.padding = '8px 10px';
-    row.style.borderRadius = '12px';
-    row.style.wordBreak = 'break-word';
-    if (m.outgoing) {
-      row.style.alignSelf = 'flex-end';
-      row.style.background = '#0b93f6';
-      row.style.color = '#fff';
-      row.style.borderBottomRightRadius = '4px';
-    } else {
-      row.style.alignSelf = 'flex-start';
-      row.style.background = '#fff';
-      row.style.color = '#111';
-      row.style.borderBottomLeftRadius = '4px';
+    const ts = m.ts || Date.now();
+
+    // вставляем разделитель даты если дата изменилась
+    if (!lastTs || !isSameDay(lastTs, ts)) {
+      const sep = document.createElement('div');
+      sep.className = 'date-separator';
+      sep.textContent = formatDateHeader(ts);
+      out.appendChild(sep);
     }
-    row.textContent = m.text || '';
+
+    // оболочка ряда (для flex-выравнивания)
+    const row = document.createElement('div');
+    row.className = 'msg-row';
+    row.classList.add(m.outgoing ? 'outgoing' : 'incoming');
+
+    // пузырь
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    // текст
+    const textEl = document.createElement('div');
+    textEl.className = 'msg-text';
+    textEl.textContent = m.text || '';
+
+    // meta (время и, при необходимости, иконки статуса)
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+
+    const timeEl = document.createElement('span');
+    timeEl.className = 'msg-time';
+    timeEl.textContent = formatTimeOnly(ts);
+
+    // опционально: можно поставить чек-иконку для исходящих (прочитано/отправлено)
+    if (m.outgoing) {
+      const tick = document.createElement('span');
+      tick.className = 'msg-tick';
+      // пример: single tick — отправлено, double tick — прочитано. Заменяй логику по своему флагу.
+      // tick.textContent = m.read ? '✔✔' : '✔';
+      // пока оставим пустым; ты можешь подсунуть read-флаг при загрузке из IDB
+      tick.textContent = '';
+      meta.appendChild(tick);
+    }
+
+    meta.appendChild(timeEl);
+
+    bubble.appendChild(textEl);
+    bubble.appendChild(meta);
+    row.appendChild(bubble);
     out.appendChild(row);
+
+    lastTs = ts;
   });
+
+  // прокрутка вниз
   out.scrollTop = out.scrollHeight;
 }
 
