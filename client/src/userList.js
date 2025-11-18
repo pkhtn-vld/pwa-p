@@ -13,6 +13,188 @@ let currentChat = null; // { userKey, displayName, messages: [] }
 let onlineSet = new Set();
 let currentOpenChatUserKey = null;
 
+// Нормализует ключ пользователя для хранения (везде используем lowerCase)
+function normKey(k) {
+  return (String(k || '')).toLowerCase();
+}
+
+// Возвращает массив непрочитанных из localStorage (по ключу 'unread_<user>')
+// Формат: [{ text, ts }, ...]
+function getUnreadArray(userKey) {
+  try {
+    const key = 'unread_' + normKey(userKey);
+    const raw = localStorage.getItem(key) || '[]';
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) return arr;
+  } catch (e) { /* ignore */ }
+  return [];
+}
+
+// Сохраняет массив непрочитанных в localStorage
+function setUnreadArray(userKey, arr) {
+  try {
+    const key = 'unread_' + normKey(userKey);
+    localStorage.setItem(key, JSON.stringify(Array.isArray(arr) ? arr : []));
+  } catch (e) { console.warn('[unread] set failed', e); }
+}
+
+// Добавляет одну запись в unread (и обновляет бейдж на UI).
+// snippet — короткий текст для отображения в списке (может быть '[Зашифровано]')
+export function addUnread(userKey, snippet) {
+  try {
+    const k = normKey(userKey);
+    const arr = getUnreadArray(k);
+    arr.push({ text: String(snippet || '').slice(0, 200), ts: Date.now() });
+    setUnreadArray(k, arr);
+    updateUnreadBadge(k);
+  } catch (e) { console.warn('[unread] add failed', e); }
+}
+
+// Очищает unread для userKey: удаляет локальный storage и скрывает бейдж.
+// Также помечает сообщения в IndexedDB как прочитанные (read=true).
+export async function clearUnreadFor(userKey) {
+  try {
+    const k = normKey(userKey);
+    // удалить запись localStorage
+    try { localStorage.removeItem('unread_' + k); } catch (e) { /* ignore */ }
+
+    // обновить DOM бейдж
+    updateUnreadBadge(k);
+
+    // пометить соответствующие сообщения в IndexedDB как read=true
+    try {
+      const rq = indexedDB.open('pwa-chat', 1);
+      rq.onsuccess = function (e) {
+        const db = e.target.result;
+        const tx = db.transaction('messages', 'readwrite');
+        const store = tx.objectStore('messages');
+        // проходим курсором и помечаем записи, относящиеся к этому чату
+        const req = store.openCursor();
+        req.onsuccess = function (ev) {
+          const cursor = ev.target.result;
+          if (!cursor) {
+            tx.oncomplete = function () { db.close(); };
+            return;
+          }
+          const rec = cursor.value;
+          const from = (rec.from || '').toLowerCase();
+          const to = (rec.to || '') ? String(rec.to).toLowerCase() : (rec.to === null ? null : '');
+          // логика: помечаем как прочитанные сообщения, если они от/к этому пользователю и ещё не read
+          if (!rec.read) {
+            if (from === k || to === k || (rec.meta && rec.meta.via === 'push' && from === k)) {
+              rec.read = true;
+              cursor.update(rec);
+            }
+          }
+          cursor.continue();
+        };
+      };
+      rq.onerror = function () { /* ignore */ };
+    } catch (e) {
+      console.warn('[unread] failed to mark messages read in IDB', e);
+    }
+  } catch (e) {
+    console.warn('[unread] clear failed', e);
+  }
+}
+
+// Обновляет DOM бейдж для указанного userKey, основываясь на localStorage 'unread_<user>'.
+// Показ: если count===0 -> скрыть; иначе показать синюю круглую метку с белым числом.
+// Ограничение: если count > 99 -> показываем '99+'.
+export function updateUnreadBadge(userKey) {
+  try {
+    const k = normKey(userKey);
+    const cnt = getUnreadArray(k).length || 0;
+    const row = document.querySelector(`.user-row[data-userkey="${k}"]`);
+    if (!row) return;
+    const badge = row.querySelector('.unread-badge');
+    if (!badge) return;
+
+    if (cnt <= 0) {
+      badge.style.display = 'none';
+      badge.textContent = '';
+      badge.setAttribute('aria-hidden', 'true');
+    } else {
+      badge.style.display = 'inline-block';
+
+      const display = cnt > 99 ? '99+' : String(cnt);
+      badge.textContent = display;
+      badge.style.background = '#0b93f6';
+      badge.style.color = '#fff';
+      badge.style.borderRadius = '999px';
+      badge.style.padding = '2px 8px';
+      badge.style.fontSize = '12px';
+      badge.style.lineHeight = '1';
+      badge.style.minWidth = '24px';
+      badge.style.textAlign = 'center';
+      badge.style.boxSizing = 'border-box';
+      badge.style.display = 'inline-block';
+      badge.setAttribute('aria-hidden', 'false');
+    }
+  } catch (e) {
+    console.warn('[unread] update badge failed', e);
+  }
+}
+
+// Обновить бейджи для всех user-row'ов (вызывается после renderUserList или при старте).
+export function updateAllBadges() {
+  try {
+    const rows = document.querySelectorAll('.user-row');
+    rows.forEach(r => {
+      const userKey = r.getAttribute('data-userkey');
+      if (userKey) updateUnreadBadge(userKey);
+    });
+  } catch (e) { /* ignore */ }
+}
+
+// При старте приложения: сканируем IndexedDB и инициализируем localStorage unread,
+// если клиент не получил postMessage от SW (кейс: пользователь открыл приложение вручную).
+// Подсчитываем все сообщения с read !== true и meta.via==='push' или to===me -> формируем unread_<from>.
+export async function initUnreadFromIDB() {
+  try {
+    const me = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
+    const rq = indexedDB.open('pwa-chat', 1);
+    rq.onsuccess = function (e) {
+      const db = e.target.result;
+      const tx = db.transaction('messages', 'readonly');
+      const store = tx.objectStore('messages');
+      const req = store.openCursor();
+      const accum = {}; // accum[from] = array of snippets
+      req.onsuccess = function (ev) {
+        const cursor = ev.target.result;
+        if (!cursor) {
+          // записываем в localStorage и обновляем бейджи
+          Object.keys(accum).forEach(k => {
+            setUnreadArray(k, accum[k]);
+          });
+          // обновим все бейджи в DOM
+          updateAllBadges();
+          db.close();
+          return;
+        }
+        const rec = cursor.value;
+        const readFlag = !!rec.read;
+        const from = (rec.from || '').toLowerCase();
+        const to = rec.to ? String(rec.to).toLowerCase() : (rec.to === null ? null : '');
+        const viaPush = rec.meta && rec.meta.via === 'push';
+        // условие: если сообщение не прочитано и оно адресовано нам или пришло через push (кейс оффлайн)
+        if (!readFlag) {
+          if ((to && me && to === me) || viaPush) {
+            if (!accum[from]) accum[from] = [];
+            const snippet = rec.encrypted ? '[Зашифровано]' : String(rec.text || '');
+            accum[from].push({ text: snippet.slice(0, 200), ts: rec.ts || Date.now() });
+          }
+        }
+        cursor.continue();
+      };
+      req.onerror = function () { db.close(); };
+    };
+    rq.onerror = function () { /* ignore */ };
+  } catch (e) {
+    console.warn('[unread] initFromIDB error', e);
+  }
+}
+
 // экспорт функции проверки
 export function isChatOpenWith(userKey) {
   if (!userKey) return false;
@@ -81,7 +263,7 @@ function updateChatStatusDot(userKey) {
     const isOnline = onlineSet.has(String(userKey).toLowerCase());
     dot.style.color = isOnline ? '#28a745' : '#9AA0A6';
     dot.title = isOnline ? 'онлайн' : 'оффлайн';
-  } catch (e) { /* silent */ }
+  } catch (e) { /* ignore */ }
 }
 
 function createTopBarIfMissing() {
@@ -90,51 +272,19 @@ function createTopBarIfMissing() {
 
   top = document.createElement('div');
   top.id = 'topBar';
-  // Базовые стили — можно вынести в CSS
-  top.style.position = 'sticky';
-  top.style.top = '0';
-  top.style.left = '0';
-  top.style.width = '100%';
-  top.style.display = 'flex';
-  top.style.alignItems = 'center';
-  top.style.justifyContent = 'space-between';
-  top.style.padding = '8px 12px';
-  top.style.boxSizing = 'border-box';
-  top.style.background = '#fafafa';
-  top.style.borderBottom = '1px solid #e6e6e6';
-  top.style.zIndex = '1000';
 
   // left: current user info
   const left = document.createElement('div');
   left.id = 'topBarLeft';
-  left.style.display = 'flex';
-  left.style.alignItems = 'center';
-  left.style.gap = '12px';
 
   const avatar = document.createElement('div');
   avatar.id = 'topBarAvatar';
-  avatar.style.width = '36px';
-  avatar.style.height = '36px';
-  avatar.style.borderRadius = '50%';
-  avatar.style.background = '#eaeaea';
-  avatar.style.display = 'flex';
-  avatar.style.alignItems = 'center';
-  avatar.style.justifyContent = 'center';
-  avatar.style.fontWeight = '600';
-  avatar.style.color = '#555';
-  avatar.textContent = '?';
 
   const nameEl = document.createElement('div');
   nameEl.id = 'topBarName';
-  nameEl.style.fontSize = '16px';
-  nameEl.style.fontWeight = '600';
-  nameEl.textContent = 'Гость';
 
   const statusEl = document.createElement('div');
   statusEl.id = 'topBarStatus';
-  statusEl.style.fontSize = '12px';
-  statusEl.style.color = '#666';
-  statusEl.textContent = 'offline';
 
   const leftWrap = document.createElement('div');
   leftWrap.style.display = 'flex';
@@ -148,9 +298,6 @@ function createTopBarIfMissing() {
   // right: profile/settings icon
   const right = document.createElement('div');
   right.id = 'topBarRight';
-  right.style.display = 'flex';
-  right.style.alignItems = 'center';
-  right.style.gap = '12px';
 
   const settingsBtn = document.createElement('button');
   settingsBtn.title = 'Настройки профиля';
@@ -188,15 +335,7 @@ function renderUserList(users) {
   if (!container) {
     container = document.createElement('div');
     container.id = 'userList';
-    // базовые стили контейнера (можно выносить в CSS)
-    container.style.width = '100%';
-    container.style.boxSizing = 'border-box';
-    container.style.padding = '0';
-    container.style.marginTop = '0';
-    container.style.background = '#f8f8f8';
-    container.style.flex = '1';
-    container.style.overflowY = 'auto';
-    // вставим перед footer или в конец body
+
     const ref = document.getElementById('result') || document.body;
     if (ref === document.body) {
       document.body.appendChild(container);
@@ -214,32 +353,14 @@ function renderUserList(users) {
     const userDiv = document.createElement('div');
     userDiv.className = 'user-row';
     userDiv.setAttribute('data-userkey', userKeyNorm);
-    userDiv.style.display = 'flex';
-    userDiv.style.alignItems = 'center';
-    userDiv.style.justifyContent = 'space-between';
-    userDiv.style.width = '100%';
-    userDiv.style.boxSizing = 'border-box';
-    userDiv.style.padding = '12px 16px';
-    userDiv.style.borderBottom = '1px solid #eee';
-    userDiv.style.background = '#fff';
 
     // left: имя пользователя
     const left = document.createElement('div');
-    left.style.display = 'flex';
-    left.style.alignItems = 'center';
-    left.style.gap = '12px';
+    left.className = 'user-left';
 
     // аватар-плейсхолдер (круг)
     const avatar = document.createElement('div');
-    avatar.style.width = '40px';
-    avatar.style.height = '40px';
-    avatar.style.borderRadius = '50%';
-    avatar.style.background = '#f0f0f0';
-    avatar.style.display = 'flex';
-    avatar.style.alignItems = 'center';
-    avatar.style.justifyContent = 'center';
-    avatar.style.fontWeight = '600';
-    avatar.style.color = '#666';
+    avatar.className = 'user-avatar';
     avatar.textContent = (u.displayName && u.displayName[0]) ? u.displayName[0].toUpperCase() : (u.userKey && u.userKey[0]) ? u.userKey[0].toUpperCase() : '?';
 
     const nameEl = document.createElement('div');
@@ -258,25 +379,18 @@ function renderUserList(users) {
 
     // статус активности (иконка — круг)
     const statusBtn = document.createElement('button');
+    statusBtn.className = 'user-statusBtn';
     statusBtn.title = 'Статус активности';
-    statusBtn.style.border = 'none';
-    statusBtn.style.background = 'transparent';
-    statusBtn.style.cursor = 'pointer';
-    statusBtn.style.fontSize = '18px';
+
     const statusDot = document.createElement('span');
     statusDot.className = 'status-dot';
     statusDot.textContent = '●';
-    statusDot.style.color = (u.online ? '#28a745' : '#9AA0A6');
-    statusDot.style.fontSize = '16px';
     statusBtn.appendChild(statusDot);
 
     // иконка сообщения
     const msgBtn = document.createElement('button');
+    msgBtn.className = 'user-msg-btn';
     msgBtn.title = 'Написать сообщение';
-    msgBtn.style.border = 'none';
-    msgBtn.style.background = 'transparent';
-    msgBtn.style.cursor = 'pointer';
-    msgBtn.style.fontSize = '18px';
     msgBtn.textContent = '✉️';
     msgBtn.addEventListener('click', () => {
       openChatForUser({ userKey: userKeyNorm, displayName: u.displayName || userKeyNorm });
@@ -284,11 +398,8 @@ function renderUserList(users) {
 
     // иконка звонка
     const callBtn = document.createElement('button');
+    callBtn.className = 'user-call-btn';
     callBtn.title = 'Позвонить';
-    callBtn.style.border = 'none';
-    callBtn.style.background = 'transparent';
-    callBtn.style.cursor = 'pointer';
-    callBtn.style.fontSize = '18px';
     callBtn.textContent = '📞';
     callBtn.addEventListener('click', () => {
       alert('Инициация звонка пользователю: ' + (u.displayName || userKeyNorm));
@@ -297,13 +408,6 @@ function renderUserList(users) {
     // элемент бейджа непрочитанных
     const unreadBadge = document.createElement('span');
     unreadBadge.className = 'unread-badge';
-    unreadBadge.style.display = 'none';
-    unreadBadge.style.background = '#0b93f6';
-    unreadBadge.style.color = '#fff';
-    unreadBadge.style.borderRadius = '10px';
-    unreadBadge.style.padding = '2px 6px';
-    unreadBadge.style.fontSize = '12px';
-    unreadBadge.style.marginLeft = '8px';
     unreadBadge.textContent = '●';
 
     right.appendChild(statusBtn);
@@ -315,6 +419,7 @@ function renderUserList(users) {
     userDiv.appendChild(right);
 
     container.appendChild(userDiv);
+    updateUnreadBadge(userKeyNorm);
   });
 }
 
@@ -333,6 +438,7 @@ export async function loadAndRenderUsers() {
     if (!data) return;
     if (data && Array.isArray(data.users)) {
       renderUserList(data.users);
+      updateAllBadges();
     } else {
       // неожиданный формат
     }
@@ -341,60 +447,32 @@ export async function loadAndRenderUsers() {
   }
 }
 
-// function escapeHtml(str) {
-//   if (!str) return '';
-//   return String(str).replace(/[&<>"'`=\/]/g, function (s) {
-//     return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','/':'&#x2F;','`':'&#x60;','=':'&#x3D;' })[s];
-//   });
-// }
-
 // Chat UI
 function createChatOverlay() {
   if (document.getElementById('chatOverlay')) return;
 
   const overlay = document.createElement('div');
   overlay.id = 'chatOverlay';
-  overlay.style.position = 'fixed';
-  overlay.style.top = '0';
-  overlay.style.left = '0';
-  overlay.style.width = '100%';
-  overlay.style.height = '100%';
-  overlay.style.flexDirection = 'column';
-  overlay.style.background = '#fff';
-  overlay.style.zIndex = '2000';
-  overlay.style.display = 'none';
 
   const top = document.createElement('div');
   top.id = 'chatTop';
-  top.style.display = 'flex';
-  top.style.alignItems = 'center';
-  top.style.justifyContent = 'space-between';
-  top.style.padding = '10px';
-  top.style.boxShadow = '0 1px 0 rgba(0,0,0,0.06)';
 
   const back = document.createElement('button');
-  back.textContent = '←';
   back.id = 'chat-back-btn';
+  back.textContent = '←';
   back.addEventListener('click', closeChat);
 
   const titleWrap = document.createElement('div');
-  titleWrap.style.display = 'flex';
-  titleWrap.style.alignItems = 'center';
-  titleWrap.style.gap = '8px';
+  top.id = 'titleWrap';
 
   const title = document.createElement('div');
   title.id = 'chatTitle';
-  title.style.fontWeight = '600';
-  title.style.fontSize = '16px';
 
   // статусная точка в заголовке
   const statusDot = document.createElement('span');
   statusDot.id = 'chatStatusDot';
-  statusDot.textContent = '●';
-  statusDot.style.fontSize = '14px';
-  statusDot.style.color = '#9AA0A6';
-  statusDot.style.lineHeight = '1';
   statusDot.title = 'оффлайн';
+  statusDot.textContent = '●';
 
   titleWrap.appendChild(statusDot);
   titleWrap.appendChild(title);
@@ -407,30 +485,14 @@ function createChatOverlay() {
 
   const messages = document.createElement('div');
   messages.id = 'chatMessages';
-  messages.style.flex = '1';
-  messages.style.overflowY = 'auto';
-  messages.style.padding = '12px';
-  messages.style.display = 'flex';
-  messages.style.flexDirection = 'column';
-  messages.style.gap = '8px';
-  messages.style.background = '#f7f7f7';
 
   const inputWrap = document.createElement('div');
-  inputWrap.style.display = 'flex';
-  inputWrap.style.padding = '8px';
-  inputWrap.style.boxSizing = 'border-box';
-  inputWrap.style.gap = '8px';
-  inputWrap.style.alignItems = 'center';
-  inputWrap.style.borderTop = '1px solid #eee';
+  inputWrap.id = 'inputWrap';
 
   const input = document.createElement('input');
   input.id = 'chatInput';
   input.type = 'text';
   input.placeholder = 'Написать сообщение';
-  input.style.flex = '1';
-  input.style.padding = '10px';
-  input.style.border = '1px solid #ddd';
-  input.style.borderRadius = '20px';
   input.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -471,7 +533,6 @@ function createChatOverlay() {
   document.body.appendChild(overlay);
 }
 
-// Экспортируем openChatForUser для вызовов извне
 export function openChatForUser({ userKey, displayName }) {
   currentOpenChatUserKey = String(userKey || '').toLowerCase();
   createChatOverlay();
@@ -479,19 +540,15 @@ export function openChatForUser({ userKey, displayName }) {
   currentChat = { userKey: normalized, displayName: displayName || userKey, messages: [] };
 
   // загрузим непрочитанные сообщения из localStorage, если есть
-  try {
+   try {
     const key = 'unread_' + normalized;
     const prev = JSON.parse(localStorage.getItem(key) || '[]');
     if (Array.isArray(prev) && prev.length > 0) {
       prev.forEach(m => currentChat.messages.push({ outgoing: false, text: m.text, ts: m.ts || Date.now() }));
       localStorage.removeItem(key);
     }
-    // прячем бейдж в списке
-    const row = document.querySelector(`.user-row[data-userkey="${normalized}"]`);
-    if (row) {
-      const badge = row.querySelector('.unread-badge');
-      if (badge) badge.style.display = 'none';
-    }
+    // прячем бейдж в списке (теперь через clearUnreadFor)
+    clearUnreadFor(normalized).catch(() => { /* ignore */ });
   } catch (e) { }
 
   document.getElementById('chatOverlay').style.display = 'flex';
@@ -502,7 +559,7 @@ export function openChatForUser({ userKey, displayName }) {
 
   renderMessages();
 
-    // Асинхронно: загрузим историю из IndexedDB и подставим в currentChat.messages
+  // Асинхронно: загрузим историю из IndexedDB и подставим в currentChat.messages
   (async () => {
     try {
       console.log('[chat] loading history for', normalized);
@@ -512,7 +569,7 @@ export function openChatForUser({ userKey, displayName }) {
       // сгруппируем записи по key = `${ts}|${from}|${to}`
       const groups = new Map();
       for (const r of rows) {
-        const key = `${r.ts}|${String(r.from||'')}|${String(r.to||'')}`;
+        const key = `${r.ts}|${String(r.from || '')}|${String(r.to || '')}`;
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(r);
       }
@@ -540,7 +597,7 @@ export function openChatForUser({ userKey, displayName }) {
             const plain = await decryptOwn(preferred.text);
             textForUI = plain;
             decrypted = true;
-            console.log('[chat] decrypted history msg ts=', preferred.ts, 'from=', preferred.from, '->', String(plain).slice(0,120));
+            console.log('[chat] decrypted history msg ts=', preferred.ts, 'from=', preferred.from, '->', String(plain).slice(0, 120));
           } catch (e) {
             console.warn('[chat] decrypt failed for preferred record ts=', preferred.ts, preferred.from, e && e.message ? e.message : e);
             // попробуем найти альтернативную запись в той же группе (например локальную), если не выбранная
@@ -655,7 +712,7 @@ async function sendChatMessage() {
     // используем userKey (нормализованный) как "me"
     const me = (localStorage.getItem('pwaUserKey') || '').trim().toLowerCase();
 
-    console.log('[send] preparing to send to=', recipient, 'textPreview=', text.slice(0,50));
+    console.log('[send] preparing to send to=', recipient, 'textPreview=', text.slice(0, 50));
 
     // получаем публичный ключ получателя (кеш/сервер)
     const pubRecipient = await getPubkey(recipient);
@@ -724,7 +781,7 @@ export function handleIncomingMessage(fromUserKey, payload) {
 
     // лог приходящего сообщения (обрезаем длинную строку для читаемости)
     try {
-      console.log('[incoming] received from=', from, 'payloadPreview=', JSON.stringify(payload).slice(0,300));
+      console.log('[incoming] received from=', from, 'payloadPreview=', JSON.stringify(payload).slice(0, 300));
     } catch (e) { console.log('[incoming] received from=', from); }
 
     const me = (localStorage.getItem('pwaUserName') || '').trim();
@@ -760,7 +817,7 @@ export function handleIncomingMessage(fromUserKey, payload) {
           if (payload.encrypted) {
             try {
               const plain = await decryptOwn(payload.text);
-              console.log('[incoming] decrypted message from', from, '->', String(plain).slice(0,200));
+              console.log('[incoming] decrypted message from', from, '->', String(plain).slice(0, 200));
               currentChat.messages.push({ outgoing: false, text: plain, ts: payload.ts || Date.now() });
               renderMessages();
             } catch (e) {
@@ -786,27 +843,17 @@ export function handleIncomingMessage(fromUserKey, payload) {
 
     // чат закрыт — отметим в списке пользователей и запомним краткую запись (unread) в localStorage
     try {
+      const snippet = payload.encrypted ? '[Зашифровано]' : String(payload.text || '');
+      addUnread(from, snippet);
+      // небольшой визуальный эффект — подсветка строки
       const row = document.querySelector(`.user-row[data-userkey="${from}"]`);
       if (row) {
-        try {
-          const badge = row.querySelector('.unread-badge');
-          if (badge) badge.style.display = 'inline-block';
-          row.style.borderLeft = '4px solid #0b93f6';
-          setTimeout(() => { try { row.style.borderLeft = ''; } catch (e) { } }, 5000);
-        } catch (e) { /* ignore */ }
+        row.style.borderLeft = '4px solid #0b93f6';
+        setTimeout(() => { try { row.style.borderLeft = ''; } catch (e) { } }, 3500);
       }
-    } catch (e) { }
+    } catch (e) { /* ignore */ }
 
-    // сохраняем в localStorage краткую непрочитанную запись (как раньше)
-    try {
-      const key = 'unread_' + from;
-      const prev = JSON.parse(localStorage.getItem(key) || '[]');
-      const snippet = payload.encrypted ? '[Зашифровано]' : String(payload.text || '');
-      prev.push({ text: snippet.slice(0, 200), ts: Date.now() });
-      localStorage.setItem(key, JSON.stringify(prev));
-    } catch (e) { console.warn('[incoming] failed to store unread in localStorage', e); }
-
-    // не отрисовали в UI (чат не открыт)
+    // сохраняем краткую непрочитанную запись в localStorage (addUnread уже сделал это)
     return false;
   } catch (e) {
     console.error('[incoming] handler error', e && (e.stack || e));
@@ -839,6 +886,116 @@ export function showResultBlock(resultBlock, lines, hideAfterMs) {
 }
 
 
+// Инициализатор обработчика postMessage от service-worker.
+// После вызова будет централизованно обрабатываться:
+//  - сообщения типа { type: 'push', data: ... }  -> addUnread + in-app toast (если чат не открыт)
+//  - сообщения типа { type: 'open_chat', from } -> диспатчим событие open_chat (и открытие чата)
+// Вызывать один раз при старте приложения (например после регистрации SW в main.js).
+export function initSWMessageHandler() {
+  if (!('serviceWorker' in navigator)) return;
+
+  // обработчик сообщений от service-worker
+  navigator.serviceWorker.addEventListener('message', (ev) => {
+    const msg = ev && ev.data;
+    if (!msg) return;
+
+    try {
+      if (msg.type === 'push') {
+        // осторожно извлекаем payload — сервер/пуш может иметь разные формы
+        const payload = msg.data || {};
+        handleSWPush(payload);
+        return;
+      }
+
+      if (msg.type === 'open_chat') {
+        const from = msg.from || (msg.data && msg.data.from) || null;
+        if (!from) return;
+        // делегируем открытие чата через глобальное событие (совместимо с текущей логикой)
+        document.dispatchEvent(new CustomEvent('open_chat', { detail: { from } }));
+        return;
+      }
+    } catch (e) {
+      console.error('[SW->client] message handler failed', e && (e.stack || e));
+    }
+  }, { passive: true });
+}
+
+
+// Обработать push-перенесённый из service-worker.
+// payload — то, что SW прислал в msg.data (как ты формируешь в SW).
+
+// Ожидаемый формат от сервера (как вариант):
+//  { title, body, data: { from, payload: { text, encrypted } } }
+
+// Функция:
+//  - вычисляет from
+//  - формирует snippet (для бейджа) — если зашифровано -> '[Зашифровано]' иначе текст/тело
+//  - если чат открыт с from — ничего не показывает (чтобы не дублировать у клиента)
+//  - иначе: addUnread(from, snippet), updateUnreadBadge(from), showInAppToast(...)
+function handleSWPush(payload) {
+  try {
+    // Попробуем извлечь поле from
+    const from =
+      (payload && payload.data && payload.data.from) ||
+      (payload && payload.from) ||
+      (payload && payload.data && payload.data.sender) ||
+      null;
+
+    // Сформируем snippet для бейджа/всплывашки:
+    // сервер может положить полезные данные в payload.data.payload
+    let snippet = '';
+    try {
+      if (payload && payload.data && payload.data.payload) {
+        const inner = payload.data.payload;
+        // inner может содержать { text, encrypted }
+        if (inner.encrypted) snippet = '[Зашифровано]';
+        else snippet = inner.text || payload.body || '';
+      } else {
+        // fallback: используем payload.body или payload.text
+        if (payload && typeof payload.body === 'string' && payload.body.length > 0) snippet = payload.body;
+        else if (payload && typeof payload.text === 'string' && payload.text.length > 0) snippet = payload.text;
+        else snippet = '[Новое сообщение]';
+      }
+    } catch (e) {
+      snippet = '[Новое сообщение]';
+    }
+
+    // Если нет from — просто покажем in-app toast, но не будем пытаться привязать к user-row
+    if (!from) {
+      try { showInAppToast('Новое сообщение', {}); } catch (e) { console.warn('[SW] showInAppToast failed', e); }
+      return;
+    }
+
+    const normFrom = String(from).toLowerCase();
+
+    // Если чат открыт — НЕ показываем бейдж/тотальную нотификацию (в UI уже отображается)
+    if (isChatOpenWith(normFrom)) {
+      // если открыт — можно обновить историю (если требуется) — но пока просто логируем
+      console.log('[SW->client] push for open chat ignored (already open):', normFrom);
+      return;
+    }
+
+    // добавляем в unread (localStorage + обновление бейджа)
+    try {
+      addUnread(normFrom, snippet);
+      updateUnreadBadge(normFrom);
+    } catch (e) {
+      console.warn('[SW->client] addUnread/updateBadge failed', e);
+    }
+
+    // Показываем в-app toast (коротко), данные 전달им как meta
+    try {
+      // красиво форматируем displayName если есть (пока — просто ucfirst)
+      const label = String(normFrom).length > 0 ? (normFrom.charAt(0).toUpperCase() + normFrom.slice(1)) : 'Пользователь';
+      showInAppToast(`Новое сообщение от ${label}`, { from: normFrom });
+    } catch (e) {
+      console.warn('[SW->client] showInAppToast failed', e);
+    }
+  } catch (e) {
+    console.error('[SW->client] handleSWPush fatal', e && (e.stack || e));
+  }
+}
+
 document.addEventListener('open_chat', (e) => {
   const from = e.detail && e.detail.from;
   if (!from) return;
@@ -847,3 +1004,11 @@ document.addEventListener('open_chat', (e) => {
   const displayName = row ? (row.querySelector('div').textContent || from) : from;
   openChatForUser({ userKey: from, displayName });
 });
+
+// При старте приложения — инициализируем unread со значений в IDB (если client не получил postMessage)
+try {
+  // даём другим модулям возможность записать pwaUserKey в localStorage до вызова этой функции
+  setTimeout(() => {
+    initUnreadFromIDB();
+  }, 300);
+} catch (e) { /* ignore */ }

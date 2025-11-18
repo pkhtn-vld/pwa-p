@@ -760,7 +760,7 @@ app.use((req, res) => {
 
             if (uniq.length > 0) {
               const pushPayload = JSON.stringify({
-                title: `Новое сообщение от ${from}`,
+                title: `Новое сообщение от ${from.charAt(0).toUpperCase() + from.slice(1)}`,
                 body: String((payload && payload.text) || '').slice(0, 200),
                 data: { from, payload }
               });

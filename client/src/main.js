@@ -1,4 +1,4 @@
-import { loadAndRenderUsers, ensureTopBar, showInAppToast, isChatOpenWith } from "./userList.js";
+import { loadAndRenderUsers, ensureTopBar, initSWMessageHandler } from "./userList.js";
 import { ensurePresenceClient } from './auth.js';
 import "../style.css";
 import "./auth.js";
@@ -7,29 +7,15 @@ import "./userList.js";
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
-    .then(reg => console.log('SW зарегистрирован', reg))
+    .then(reg => {
+      console.log('SW зарегистрирован', reg);
+      try {
+        initSWMessageHandler();
+      } catch (e) {
+        console.warn('initSWMessageHandler failed', e);
+      }
+    })
     .catch(err => console.error('Ошибка регистрации SW:', err));
-
-
-  navigator.serviceWorker.addEventListener('message', (ev) => {
-    const msg = ev.data;
-    if (!msg) return;
-
-    if (msg.type === 'push') {
-      const payload = msg.data || {};
-      const from = payload && payload.data && payload.data.from;
-      if (from && isChatOpenWith(from)) return;
-      showInAppToast(`Новое сообщение от ${from.charAt(0).toUpperCase() + from.slice(1)}`, { from });
-      return;
-    }
-
-    if (msg.type === 'open_chat') {
-      const from = msg.from;
-      if (!from) return;
-      document.dispatchEvent(new CustomEvent('open_chat', { detail: { from } }));
-      return;
-    }
-  });
 }
 
 // Проверка режима установки и сетевого статуса
@@ -70,7 +56,7 @@ async function subscribeToPush() {
   if (perm !== 'granted') {
     alert('Недостаточно прав')
     return;
-  } 
+  }
 
   const reg = await navigator.serviceWorker.ready;
   const vapidResp = await fetch('/vapidPublicKey', { credentials: 'include' });
@@ -127,7 +113,7 @@ let lastTouchEnd = 0;
 document.addEventListener("touchend", function (event) {
   const now = Date.now();
   if (now - lastTouchEnd <= 300) {
-    event.preventDefault(); 
+    event.preventDefault();
   }
   lastTouchEnd = now;
 }, false);
@@ -139,7 +125,7 @@ async function checkSession() {
       const data = await resp.json();
       if (data.authenticated) {
         console.log('checkSession done');
-        
+
         const displayName = data.userName;
         // повторяем логику как после успешного login:
         localStorage.setItem('pwaUserName', displayName);

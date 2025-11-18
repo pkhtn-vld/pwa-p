@@ -75,7 +75,7 @@ self.addEventListener('notificationclick', function (event) {
 // saveToIDB(msg)
 // сохраняет объект msg в IndexedDB базы 'pwa-chat', store 'messages'.
 // формат записи ожидаемый клиентом:
-// { from, to, text, encrypted: true|false, ts, meta: {...} }
+// { from, to, text, encrypted: true|false, ts, meta: {...}, read: false }
 // возвращает Promise<boolean> — true если записано, false при ошибке.
 function saveToIDB(msg) {
   return new Promise((resolve) => {
@@ -130,7 +130,8 @@ self.addEventListener('push', event => {
           text: payload && payload.text ? payload.text : (data.body || ''),
           encrypted: !!(payload && payload.encrypted),
           ts: Date.now(),
-          meta: { via: 'push' }
+          meta: { via: 'push' },
+          read: false,
         };
         const ok = await saveToIDB(msgToSave);
         console.log('[SW] saveToIDB for push returned', !!ok, 'from=', from);
