@@ -12,7 +12,6 @@ if ('serviceWorker' in navigator) {
 
 
   navigator.serviceWorker.addEventListener('message', (ev) => {
-    ///////
     const msg = ev.data;
     if (!msg) return;
 
@@ -20,7 +19,7 @@ if ('serviceWorker' in navigator) {
       const payload = msg.data || {};
       const from = payload && payload.data && payload.data.from;
       if (from && isChatOpenWith(from)) return;
-      showInAppToast(payload.title || 'Новое сообщение', payload.body || '', payload.data || {});
+      showInAppToast(`Новое сообщение от ${from.charAt(0).toUpperCase() + from.slice(1)}`, { from });
       return;
     }
 

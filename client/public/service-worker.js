@@ -102,7 +102,6 @@ function saveToIDB(msg) {
 }
 
 self.addEventListener('push', event => {
-  ///////
   let data = {};
   try {
     data = event.data && typeof event.data.json === 'function' ? event.data.json() : {};
@@ -153,8 +152,8 @@ self.addEventListener('push', event => {
       // В противном случае (нет видимых окон) — показываем нативную нотификацию
       const title = data.title || 'Новое сообщение';
       const options = {
-        body: data.body || '',
-        data: data.data || {}, // payload.data должен содержать { from, ... }
+        body: '',
+        data: data.data || {},
         tag: data.tag || ('chat-' + (data.data && data.data.from || Date.now())),
         renotify: true,
         icon: '/assets/icon-phone-192.png'

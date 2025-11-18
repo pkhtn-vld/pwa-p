@@ -64,14 +64,13 @@ function attachPresenceListeners(p) {
     updateOnlineList(online);
   });
   p.on('signal', (from, payload) => {
-    ///////
     try {
       if (payload && payload.type === 'chat_message') {
         try {
           const handled = handleIncomingMessage(from, payload);
           // если сообщение НЕ добавлено прямо в открытый чат — покажем in-app toast (не системную нотификацию)
           if (!handled) {
-            showInAppToast(`Новое сообщение от ${from}`, String(payload.text || '').slice(0, 200), { from });
+            showInAppToast(`Новое сообщение от ${from.charAt(0).toUpperCase() + from.slice(1)}`, { from });
           }
         } catch (e) {
           console.error('signal handler error', e);

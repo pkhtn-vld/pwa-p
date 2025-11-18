@@ -72,7 +72,7 @@ function requestLogger(req, res, next) {
 app.use(requestLogger);
 
 
-// --- VAPID ---
+// --- VAPID
 const VAPID_PUBLIC = process.env.publicKey;
 const VAPID_PRIVATE = process.env.privateKey;
 if (VAPID_PUBLIC && VAPID_PRIVATE) {
@@ -335,7 +335,7 @@ app.post('/send', async (req, res) => {
 });
 
 
-// --- Passkey / WebAuthn ---
+// --- Passkey / WebAuthn
 
 const expectedChallenges = new Map();
 

@@ -4,7 +4,6 @@ import {
   decryptOwn,
   saveMessageLocal,
   getMessagesWith,
-  cachePubkey,
   getLocalKeypair,
   fetchAndCachePubkey
 } from './cryptoSodium.js';
@@ -21,7 +20,7 @@ export function isChatOpenWith(userKey) {
 }
 
 // Простейший in-app toast (замените на ваш компонент/стиль)
-export function showInAppToast(title, body, meta = {}) {
+export function showInAppToast(title, meta = {}) {
   try {
     const id = 'inapp-toast';
     let el = document.getElementById(id);
@@ -40,12 +39,12 @@ export function showInAppToast(title, body, meta = {}) {
       el.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)';
       document.body.appendChild(el);
     }
-    el.textContent = `${title}: ${body}`;
+    el.textContent = `${title}`;
     el.style.display = 'block';
     // исчезает через 4 сек
     setTimeout(() => { try { el.style.display = 'none'; } catch (e) { } }, 4000);
   } catch (e) {
-    console.log('toast fallback', title, body);
+    console.log('toast fallback', title);
   }
 }
 
@@ -441,7 +440,7 @@ function createChatOverlay() {
         await sendChatMessage();
       } catch (err) {
         console.error('[UI] sendChatMessage error', err && (err.stack || err));
-        showInAppToast('Ошибка', 'Не удалось отправить сообщение');
+        showInAppToast('Ошибка: Не удалось отправить сообщение');
       } finally {
         sendBtn.disabled = false;
       }
@@ -458,7 +457,7 @@ function createChatOverlay() {
       await sendChatMessage();
     } catch (err) {
       console.error('[UI] sendChatMessage error', err && (err.stack || err));
-      showInAppToast('Ошибка', 'Не удалось отправить сообщение');
+      showInAppToast('Ошибка: Не удалось отправить сообщение');
     } finally {
       sendBtn.disabled = false;
     }
@@ -576,7 +575,7 @@ export function openChatForUser({ userKey, displayName }) {
               const localPub = localKeys && localKeys.publicKeyBase64 ? localKeys.publicKeyBase64 : null;
               if (serverPub && localPub && serverPub !== localPub) {
                 console.warn('[chat] local public key differs from server public key — historical decryption impossible for messages encrypted to server key');
-                showInAppToast('Ключи изменены', 'Ваш локальный ключ не совпадает с серверным — старые сообщения не расшифруются.');
+                showInAppToast('Ключи изменены: Ваш локальный ключ не совпадает с серверным — старые сообщения не расшифруются.');
               }
             }
           } catch (diagE) {
@@ -647,7 +646,7 @@ async function sendChatMessage() {
 
   if (!presenceClient) {
     console.warn('presenceClient not set; cannot send message');
-    showInAppToast('Ошибка', 'Отправка невозможна: не подключён presenceClient');
+    showInAppToast('Ошибка: Отправка невозможна: не подключён presenceClient');
     return;
   }
 
@@ -662,7 +661,7 @@ async function sendChatMessage() {
     const pubRecipient = await getPubkey(recipient);
     if (!pubRecipient) {
       console.error('[send] no public key for', recipient);
-      showInAppToast('Ошибка', 'Публичный ключ получателя не найден, отправка отменена');
+      showInAppToast('Ошибка: Публичный ключ получателя не найден, отправка отменена');
       return;
     }
 
@@ -670,7 +669,7 @@ async function sendChatMessage() {
     const localKeys = await getLocalKeypair();
     if (!localKeys || !localKeys.publicKeyBase64) {
       console.error('[send] no local sodium keypair present');
-      showInAppToast('Ошибка', 'Локальная пара ключей не найдена, попытайтесь повторно авторизоваться');
+      showInAppToast('Ошибка: Локальная пара ключей не найдена, попытайтесь повторно авторизоваться');
       return;
     }
     const myPubB64 = localKeys.publicKeyBase64;
@@ -698,22 +697,6 @@ async function sendChatMessage() {
       console.warn('[send] failed to save local encrypted copy to IDB', e && e.message ? e.message : e);
     }
 
-    // опционально: сохраним также копию, зашифрованную для получателя (remote copy)
-    //    Это может быть полезно для синхронизации/бэкапа. Флаг meta.remoteCopy отличает её.
-    // try {
-    //   await saveMessageLocal({
-    //     from: me,
-    //     to: recipient,
-    //     text: cipherForRecipient,
-    //     encrypted: true,
-    //     ts,
-    //     meta: { remoteCopy: true, sentByMe: true }
-    //   });
-    //   console.log('[send] saved remote encrypted copy to IDB (for sync)', { to: recipient, ts });
-    // } catch (e) {
-    //   console.warn('[send] failed to save remote encrypted copy to IDB', e && e.message ? e.message : e);
-    // }
-
     // отрисовываем plaintext локально (пользователь должен увидеть своё сообщение сразу)
     currentChat.messages.push({ outgoing: true, text, ts });
     renderMessages();
@@ -729,7 +712,7 @@ async function sendChatMessage() {
     }
   } catch (e) {
     console.error('[send] failed', e && (e.stack || e));
-    showInAppToast('Ошибка', 'Не удалось отправить сообщение');
+    showInAppToast('Ошибка: Не удалось отправить сообщение');
   }
 }
 
@@ -857,7 +840,6 @@ export function showResultBlock(resultBlock, lines, hideAfterMs) {
 
 
 document.addEventListener('open_chat', (e) => {
-  ///////
   const from = e.detail && e.detail.from;
   if (!from) return;
   // найди displayName в списке пользователей или используем userKey
