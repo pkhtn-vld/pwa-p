@@ -138,7 +138,7 @@ export function createPresenceClient(opts = {}) {
       }
 
       // ограничение типов: разрешаем только определённые типы сообщений
-      const allowedTypes = ['chat_message'];
+      const allowedTypes = ['chat_message', 'chat_receipt'];
       if (!payload.type || allowedTypes.indexOf(payload.type) === -1) {
         throw new Error('unsupported payload.type');
       }
@@ -154,6 +154,18 @@ export function createPresenceClient(opts = {}) {
         }
 
         payload.text = text.slice(0, 2000);
+      }
+
+      // валидация chat_receipt: ожидаем ts и status
+      if (payload.type === 'chat_receipt') {
+        if (!('ts' in payload) || isNaN(Number(payload.ts))) {
+          throw new Error('chat_receipt requires numeric ts');
+        }
+        const status = String(payload.status || '');
+        const allowedStatus = ['delivered', 'read', 'failed'];
+        if (allowedStatus.indexOf(status) === -1) {
+          throw new Error('chat_receipt: unsupported status');
+        }
       }
 
       const msg = { type: 'signal', to: String(to), payload };

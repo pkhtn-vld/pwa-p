@@ -762,10 +762,11 @@ function renderMessages() {
     tick.className = 'msg-tick';
     if (m.outgoing) {
       // m.delivery может быть 'pending'|'sent'|'read'|'failed'
-      if (m.delivery === 'pending' || !m.delivery) tick.textContent = '⏳'; // или пусто
-      else if (m.delivery === 'sent') tick.textContent = '✔';
+      if (m.delivery === 'pending' || !m.delivery) tick.textContent = '⏳';
+      else if (m.delivery === 'delivered' || m.delivery === 'sent') tick.textContent = '✔';
       else if (m.delivery === 'read') tick.textContent = '✔✔';
       else if (m.delivery === 'failed') tick.textContent = '❗';
+
       meta.appendChild(tick);
     }
 
@@ -860,16 +861,17 @@ async function sendChatMessage() {
       console.error('[send] presenceClient.sendSignal threw', e && e.stack ? e.stack : e);
     }
 
-    // если sendSignal вернул true/ok — считаем доставленным (по протоколу presenceClient)
-    // обновим статус в UI и IDB
-    const newStatus = sent ? 'sent' : 'failed';
 
-    // обновим текущую память (найдём сообщение по ts)
-    const msg = currentChat.messages.slice().reverse().find(m => m.outgoing && Number(m.ts) === Number(ts));
-    if (msg) msg.delivery = newStatus;
+    // Не меняем status на 'sent' сразу после sendSignal — ждём реального receipt от получателя.
+    // Но логируем состояние отправки на сервер
+    if (sent) {
+      console.log('[send] message accepted by server/ws (still waiting for delivery receipt)');
+    } else {
+      console.log('[send] message queued locally (no active WS). Will be sent when connection restores');
+      // (опционально) можно показать пользователю toast о том, что сообщение в очереди
+    }
 
-    // обновим в IDB
-    try { await updateMessageDeliveryStatus(recipient, ts, newStatus); } catch (e) { /* ignore */ }
+    // UI уже показывает 'pending' (⏳). renderMessages() ниже обновит вид.
     renderMessages();
   } catch (e) {
     console.error('[send] failed', e && (e.stack || e));
@@ -885,22 +887,27 @@ export async function handleIncomingMessage(fromUserKey, payload) {
     const from = String(fromUserKey || '').toLowerCase();
 
     if (payload.type === 'chat_receipt') {
-      // payload: { ts, status }
+      // payload: { ts, status }  where status is 'delivered' | 'read' | 'failed'
       const ts = payload.ts;
-      const status = payload.status; // 'delivered'|'read'|'failed'
-      // Обновим in-memory currentChat.messages если есть
+      const status = payload.status; // ожидаем 'delivered'|'read'|'failed'
+
+      // Обновим in-memory currentChat.messages если открыт чат с этим пользователем
       if (currentChat && currentChat.userKey === from) {
         for (let i = currentChat.messages.length - 1; i >= 0; i--) {
           const m = currentChat.messages[i];
           if (m.outgoing && Number(m.ts) === Number(ts)) {
-            m.delivery = status === 'read' ? 'read' : (status === 'delivered' ? 'sent' : status);
+            // сохраняем внутренние статусы 'pending'|'delivered'|'read'|'failed'
+            if (status === 'read') m.delivery = 'read';
+            else if (status === 'delivered') m.delivery = 'delivered';
+            else m.delivery = status || m.delivery;
             break;
           }
         }
         renderMessages();
       }
-      // Также обновим IDB
-      try { await updateMessageDeliveryStatus(from, ts, status === 'read' ? 'read' : (status === 'delivered' ? 'sent' : status)); } catch (e) { }
+
+      // Также обновим IDB (передаём тот же синтаксис)
+      try { await updateMessageDeliveryStatus(from, ts, status === 'read' ? 'read' : (status === 'delivered' ? 'delivered' : status)); } catch (e) { /* ignore */ }
       return true;
     }
 
@@ -1102,6 +1109,28 @@ async function handleSWPush(payload) {
       showInAppToast(`Новое сообщение от ${label}`, { from: normFrom });
     } catch (e) {
       console.warn('[SW->client] showInAppToast failed', e);
+    }
+
+    // Если у нас есть presenceClient и в push-полезных данных есть оригинальный ts — подтвердим доставку
+    try {
+      const inner = (payload && payload.data && payload.data.payload) || null;
+      const origTs = inner && (inner.ts || inner.messageTs || inner.t) ? (inner.ts || inner.messageTs || inner.t) : null;
+
+      // Если чат открыт и видим — считаем прочитаным
+      const shouldMarkRead = isChatOpenWith(normFrom);
+
+      if (presenceClient && typeof presenceClient.sendSignal === 'function' && origTs) {
+        const receiptStatus = shouldMarkRead ? 'read' : 'delivered';
+        try {
+          const receiptPayload = { type: 'chat_receipt', ts: origTs, status: receiptStatus };
+          presenceClient.sendSignal(normFrom, receiptPayload);
+          console.log('[SW->client receipt] sent', receiptPayload, 'to', normFrom);
+        } catch (e) {
+          console.warn('[SW->client] failed to send receipt', e);
+        }
+      }
+    } catch (e) {
+      console.warn('[SW->client] receipt send attempt failed', e);
     }
   } catch (e) {
     console.error('[SW->client] handleSWPush fatal', e && (e.stack || e));
