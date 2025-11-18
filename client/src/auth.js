@@ -65,22 +65,28 @@ function attachPresenceListeners(p) {
   });
   p.on('signal', async (from, payload) => {
     try {
-      if (payload && payload.type === 'chat_message') {
+      console.log('[presence.signal] from=', from, 'payload=', payload);
+
+      // Обрабатываем и chat_message, и chat_receipt через один обработчик,
+      // который делегирует детали в handleIncomingMessage.
+      if (payload && (payload.type === 'chat_message' || payload.type === 'chat_receipt')) {
         try {
           const handled = await handleIncomingMessage(from, payload);
-          // если сообщение НЕ добавлено прямо в открытый чат — покажем in-app toast (не системную нотификацию)
-          if (!handled) {
+          // Показываем in-app toast только если это chat_message и не отрисовано в открытом чате
+          if (!handled && payload.type === 'chat_message') {
             showInAppToast(`Новое сообщение от ${from.charAt(0).toUpperCase() + from.slice(1)}`, { from });
           }
         } catch (e) {
-          console.error('signal handler error', e);
+          console.error('[presence.signal] handleIncomingMessage threw', e);
         }
         return;
       }
+
+      // другие типы сигналов — логируем
+      console.log('signal from', from, payload);
     } catch (e) {
       console.error('signal handler error', e);
     }
-    console.log('signal from', from, payload);
   });
   // p.on('open'...)
 }
