@@ -778,7 +778,7 @@ function renderMessages() {
   let lastTs = null;
 
   currentChat.messages.forEach(m => {
-    const ts = m.ts || Date.now();
+    const ts = m.meta.origTs || m.ts || m.meta.localTs || Date.now();
 
     // вставляем разделитель даты если дата изменилась
     if (!lastTs || !isSameDay(lastTs, ts)) {

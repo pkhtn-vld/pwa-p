@@ -116,13 +116,18 @@ self.addEventListener('push', event => {
     try {
       const from = (data.data && data.data.from) || null;
       const payload = (data.data && data.data.payload) || null;
+      const origTs = (payload && (payload.ts || payload.origTs || payload.messageTs)) ||
+        (data.data && (data.data.ts || data.data.origTs)) ||
+        (data.ts || null);
+      console.log('origTs = ', origTs);
+
       const msgToSave = {
         from,
         to: null,
         text: payload && payload.text ? payload.text : (data.body || ''),
         encrypted: !!(payload && payload.encrypted),
-        ts: Date.now(),
-        meta: { via: 'push' },
+        ts: origTs,
+        meta: { via: 'push', localTs: Date.now() },
         read: false,
       };
       const ok = await saveToIDB(msgToSave);
@@ -156,7 +161,7 @@ self.addEventListener('push', event => {
       const options = {
         body: '',
         data: data.data || {},
-        tag: data.tag || ('chat-' + (data.data && data.data.from || Date.now())),
+        tag: data.tag || ('chat-' + (data.data && data.data.from || origTs)),
         renotify: true,
         icon: '/assets/icon-phone-192.png'
       };
