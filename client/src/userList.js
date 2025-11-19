@@ -95,25 +95,78 @@ export function markAllReadFor(userKey) {
       const tx = db.transaction('messages', 'readwrite');
       const store = tx.objectStore('messages');
       const req = store.openCursor();
+
+      // Собираем ts сообщений, которые мы пометили read=true в этой транзакции.
+      const changedTs = [];
+
       req.onsuccess = function (ev) {
         const cursor = ev.target.result;
         if (!cursor) {
-          tx.oncomplete = function () { db.close(); resolve(); };
+          // транзакция завершится; в tx.oncomplete отправим receipts
+          tx.oncomplete = function () {
+            try {
+              db.close();
+            } catch (e) { /* ignore */ }
+
+            // После успешного обновления в IDB — отправляем read receipts.
+            // Если presenceClient отсутствует — sendSignal вернёт false или буферизует в клиенте,
+            // но мы по крайней мере сделали попытку отправки и залогировали это.
+            (async () => {
+              if (!changedTs.length) {
+                console.log('[markAllReadFor] nothing changed, no receipts to send for', k);
+                resolve();
+                return;
+              }
+
+              console.log('[markAllReadFor] will send read receipts for ts list', { to: k, count: changedTs.length });
+
+              for (const t of changedTs) {
+                try {
+                  if (presenceClient && typeof presenceClient.sendSignal === 'function') {
+                    const payload = { type: 'chat_receipt', ts: Number(t), status: 'read' };
+                    const ok = presenceClient.sendSignal(k, payload);
+                    console.log('[markAllReadFor] sent read receipt attempt', { to: k, ts: t, ok });
+                  } else {
+                    console.warn('[markAllReadFor] no presenceClient to send receipt to', k, t);
+                  }
+                } catch (e) {
+                  console.warn('[markAllReadFor] failed to send read receipt', { to: k, ts: t, err: e && e.message ? e.message : e });
+                }
+              }
+              resolve();
+            })();
+          };
           return;
         }
+
         const rec = cursor.value;
         const from = (rec.from || '').toLowerCase();
         const to = rec.to ? String(rec.to).toLowerCase() : (rec.to === null ? null : '');
         const viaPush = rec.meta && rec.meta.via === 'push';
+
+        // Только если не помечено read — ставим read=true
         if (!rec.read) {
           if ((to && me && to === me && from === k) || (viaPush && from === k)) {
+            // Помечаем прочитанным
             rec.read = true;
             cursor.update(rec);
+            if (rec.ts) {
+              changedTs.push(Number(rec.ts));
+              console.log('[markAllReadFor] marking record read (will send receipt later)', { from: rec.from, to: rec.to, ts: rec.ts });
+            } else {
+              console.log('[markAllReadFor] marking record read (no ts) ', { rec });
+            }
           }
         }
+
         cursor.continue();
       };
-      req.onerror = function () { db.close(); resolve(); };
+
+      req.onerror = function (err) {
+        try { db.close(); } catch (e) {}
+        console.warn('[markAllReadFor] cursor error', err);
+        resolve();
+      };
     } catch (e) {
       console.warn('[unread] markAllReadFor failed', e);
       resolve();
@@ -880,42 +933,34 @@ async function sendChatMessage() {
 }
 
 // для получения входящих сообщений из auth.js (presence listener) 
-// для получения входящих сообщений из auth.js (presence listener) 
 export async function handleIncomingMessage(fromUserKey, payload) {
   try {
     if (!payload) return false;
     const from = String(fromUserKey || '').toLowerCase();
 
-    // Обработка chat_receipt (пришедшего от получателя в ответ на наши отправленные сообщения)
     if (payload.type === 'chat_receipt') {
-      // payload: { ts, status }  where status is 'delivered' | 'read' | 'failed'
+      // (существующая логика — без изменений, оставлена для контекста)
       const ts = payload.ts;
-      const status = String(payload.status || '').toLowerCase(); // 'delivered'|'read'|'failed'
+      const status = payload.status; // ожидаем 'delivered'|'read'|'failed'
 
-      console.log('[incoming][receipt] from=', from, 'ts=', ts, 'status=', status);
-
-      // Обновим in-memory currentChat.messages если открыт чат с этим пользователем
       if (currentChat && currentChat.userKey === from) {
         for (let i = currentChat.messages.length - 1; i >= 0; i--) {
           const m = currentChat.messages[i];
           if (m.outgoing && Number(m.ts) === Number(ts)) {
-            // сохраняем внутренние статусы 'pending'|'delivered'|'read'|'failed'
             if (status === 'read') m.delivery = 'read';
             else if (status === 'delivered') m.delivery = 'delivered';
             else m.delivery = status || m.delivery;
-            console.log('[incoming][receipt] updated in-memory message', { idx: i, ts: m.ts, newDelivery: m.delivery });
             break;
           }
         }
         renderMessages();
       }
 
-      // Также обновим IDB (передаём тот же синтаксис)
       try {
-        const dbResult = await updateMessageDeliveryStatus(from, ts, status === 'read' ? 'read' : (status === 'delivered' ? 'delivered' : status));
-        console.log('[incoming][receipt] updateMessageDeliveryStatus result:', dbResult);
+        const res = await updateMessageDeliveryStatus(from, ts, status === 'read' ? 'read' : (status === 'delivered' ? 'delivered' : status));
+        console.log('[incoming][receipt] from=', from, 'ts=', ts, 'status=', status, 'updateMessageDeliveryStatus result:', res);
       } catch (e) {
-        console.warn('[incoming][receipt] updateMessageDeliveryStatus threw', e && e.message ? e.message : e);
+        console.warn('[incoming][receipt] updateMessageDeliveryStatus threw', e);
       }
       return true;
     }
@@ -923,66 +968,61 @@ export async function handleIncomingMessage(fromUserKey, payload) {
     // Обработка входящего chat_message
     if (!payload || payload.type !== 'chat_message') return false;
 
-    // Вычислим корректный ts для сохранения — критично использовать одну и ту же переменную и для сохранения, и для отправки receipt.
-    // Если сервер прислал payload.ts — используем его. Иначе генерируем локально и будем им оперировать.
-    const messageTs = (typeof payload.ts !== 'undefined' && payload.ts !== null) ? Number(payload.ts) : Date.now();
-
     const me = (localStorage.getItem('pwaUserName') || '').trim();
     const shouldMarkRead = !!(currentChat && currentChat.userKey === from);
 
-    console.log('[incoming][message] from=', from, 'ts=', messageTs, 'encrypted=', !!payload.encrypted, 'shouldMarkRead=', shouldMarkRead);
-
-    // Сохраняем запись в IDB с заранее вычисленным messageTs
+    // сохраняем и дождёмся записи
     try {
       await saveMessageLocal({
         from,
         to: me,
         text: payload.encrypted ? payload.text : String(payload.text || ''),
         encrypted: !!payload.encrypted,
-        ts: messageTs,
+        ts: payload.ts || Date.now(),
         meta: { deliveredVia: 'ws' },
         read: shouldMarkRead
       });
-      console.log('[incoming][message] saved to IDB', { from, ts: messageTs, read: shouldMarkRead });
     } catch (e) {
-      console.warn('[incoming][message] failed to save message to IDB', e && e.message ? e.message : e);
+      console.warn('[incoming] failed to save message to IDB', e);
     }
 
-    // Если чат открыт — отрисуем (неблокирующе)
+    // Если чат открыт — отрисуем (и отправим read receipt)
     if (currentChat && currentChat.userKey === from) {
       (async () => {
         try {
+          const messageTs = payload.ts || Date.now();
           if (payload.encrypted) {
             try {
               const plain = await decryptOwn(payload.text);
               currentChat.messages.push({ outgoing: false, text: plain, ts: messageTs });
-              console.log('[incoming][message] decrypted and appended to in-memory messages', { ts: messageTs });
             } catch (e) {
               currentChat.messages.push({ outgoing: false, text: '[Зашифровано]', ts: messageTs });
-              console.warn('[incoming][message] decrypt failed, appended placeholder', e && e.message ? e.message : e);
             }
           } else {
             currentChat.messages.push({ outgoing: false, text: String(payload.text || ''), ts: messageTs });
           }
+
           renderMessages();
+
+          // Отправляем read receipt немедленно — т.к. чат открыт и сообщение показано пользователю.
+          try {
+            if (presenceClient && typeof presenceClient.sendSignal === 'function') {
+              const receiptPayload = { type: 'chat_receipt', ts: messageTs, status: 'read' };
+              const ok = presenceClient.sendSignal(from, receiptPayload);
+              console.log('[incoming][receipt] sent read for open chat', { to: from, ts: messageTs, ok });
+            } else {
+              console.warn('[incoming][receipt] no presenceClient to send read for open chat', { to: from, ts: messageTs });
+            }
+          } catch (e) {
+            console.warn('[incoming][receipt] failed sending read for open chat', e && e.message ? e.message : e);
+          }
+
         } catch (e) { console.error(e); }
       })();
-
-      // Если чат открыт — пометим прочитанным и отправим receipt 'read'
-      try {
-        if (presenceClient && typeof presenceClient.sendSignal === 'function') {
-          const receiptPayload = { type: 'chat_receipt', ts: messageTs, status: 'read' };
-          const ok = presenceClient.sendSignal(from, receiptPayload);
-          console.log('[incoming][message] sent read-receipt (chat open)', { to: from, ts: messageTs, ok });
-        }
-      } catch (e) {
-        console.warn('[incoming][message] failed to send read receipt', e && e.message ? e.message : e);
-      }
-
       return true;
     }
 
-    // Чат закрыт — обновим бейдж и отправим delivered receipt
+    // чат закрыт — уже существующая логика: обновим бейдж и отправим delivered receipt
     try {
       await updateUnreadBadge(from);
       const row = document.querySelector(`.user-row[data-userkey="${from}"]`);
@@ -997,13 +1037,15 @@ export async function handleIncomingMessage(fromUserKey, payload) {
     try {
       if (presenceClient && typeof presenceClient.sendSignal === 'function') {
         const receiptStatus = shouldMarkRead ? 'read' : 'delivered'; // если чат открыт — read, иначе delivered
-        const receiptPayload = { type: 'chat_receipt', ts: messageTs, status: receiptStatus };
-        const ok = presenceClient.sendSignal(from, receiptPayload);
-        console.log('[incoming] sent', receiptPayload, 'to', from, 'ok=', ok);
+        try {
+          const receiptPayload = { type: 'chat_receipt', ts: payload.ts, status: receiptStatus };
+          presenceClient.sendSignal(from, receiptPayload);
+          console.log('[receipt] sent', receiptPayload, 'to', from);
+        } catch (e) {
+          console.warn('[receipt] failed to send receipt', e && e.message ? e.message : e);
+        }
       }
-    } catch (e) {
-      console.warn('[receipt] failed to send receipt', e && e.message ? e.message : e);
-    }
+    } catch (e) { /* ignore */ }
 
     return false;
   } catch (e) {
