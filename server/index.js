@@ -687,6 +687,76 @@ app.get('/pubkey', (req, res) => {
   }
 });
 
+// Вызывается service worker на клиенте, когда он получил push и сохранил его в IDB.
+// Сервис найдёт WS-клиенты отправителя и отправит им сигнал типа chat_receipt.
+app.post('/push-received', async (req, res) => {
+  try {
+    // --- проверяем сессию (получатель push)
+    const cookie = req.headers.cookie || '';
+    const match = cookie.split(';').map(s => s.trim()).find(s => s.startsWith('pwa_session='));
+    if (!match) {
+      console.warn('[push-received] no session cookie');
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+    const sessionId = match.split('=')[1];
+    const s = getSession(sessionId);
+    if (!s) {
+      console.warn('[push-received] session invalid or expired for sessionId=', sessionId);
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const recipient = (s.userKey || '').toString().toLowerCase(); // текущий пользователь — получатель push
+    const body = req.body || {};
+    const fromRaw = String(body.from || '').toLowerCase();
+    const messageTs = body.ts || null;
+    const messageId = body.messageId || null;
+    const status = body.status || 'delivered'; // по умолчанию delivered
+
+    if (!fromRaw) {
+      console.warn('[push-received] missing from in body');
+      return res.status(400).json({ error: 'from required' });
+    }
+
+    console.log('[push-received] recip=', recipient, '-> notifying sender=', fromRaw, 'ts=', messageTs, 'messageId=', messageId, 'status=', status);
+
+    // попытка послать chat_receipt отправителю по WS
+    try {
+      const senderKey = fromRaw;
+      const targets = (presenceObj && presenceObj.clientsByUser && presenceObj.clientsByUser.get(senderKey)) || null;
+      let openCount = 0;
+      let visibleOpenCount = 0;
+
+      if (targets && targets.size > 0) {
+        for (const t of targets) {
+          try {
+            if (t.readyState === t.OPEN) {
+              openCount++;
+              const isVisible = Boolean(t._meta && t._meta.visible);
+              if (isVisible) {
+                visibleOpenCount++;
+                const payload = { type: 'signal', from: recipient, payload: { type: 'chat_receipt', ts: messageTs, status } };
+                t.send(JSON.stringify(payload));
+              }
+            }
+          } catch (e) {
+            console.warn('[push-received] failed sending to one socket', e && e.message ? e.message : e);
+          }
+        }
+      }
+
+      console.log('[push-received] targets=', targets ? targets.size : 0, 'open=', openCount, 'visibleOpen=', visibleOpenCount);
+
+      // Возвращаем успех в любом случае (если отправитель не в сети — сервер ничего не должен ломать)
+      return res.json({ ok: true, sentToOpen: visibleOpenCount > 0 });
+    } catch (e) {
+      console.error('[push-received] internal send error', e && (e.stack || e));
+      return res.status(500).json({ error: 'internal' });
+    }
+  } catch (e) {
+    console.error('[push-received] handler error', e && (e.stack || e));
+    return res.status(500).json({ error: 'internal' });
+  }
+});
 
 // to dev
 app.post('/debug-log', (req, res) => {
@@ -732,7 +802,8 @@ app.use((req, res) => {
     const server = http.createServer(app);
 
     // перед стартом: передаём функцию getSessionById
-    attachPresence(server, {
+    // Сохраняем возвращаемый объект, чтобы иметь доступ к clientsByUser для отправки receipts из HTTP-эндпойнта.
+    const presenceObj = attachPresence(server, {
       getSessionById: (sessionId) => sessions[sessionId] || null,
       onSignal: async (from, to, payload, delivered) => {
         console.log('signal', from, '->', to, 'delivered=', delivered);

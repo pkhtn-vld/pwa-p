@@ -132,6 +132,35 @@ self.addEventListener('push', event => {
       };
       const ok = await saveToIDB(msgToSave);
       console.log('[SW] saveToIDB for push returned', !!ok, 'from=', from);
+
+      // сообщаем серверу, что push был получен SW (чтобы сервер мог переслать receipt отправителю)
+      (async () => {
+        try {
+          // Формируем тело: from (оригинальный отправитель), ts (origTs, если был), messageId (если есть), status
+          const notifyBody = {
+            from: (payload && payload.from) || (data.data && data.data.from) || null,
+            ts: msgToSave.ts || (msgToSave.meta && msgToSave.meta.origTs) || null,
+            messageId: (payload && payload.messageId) || (data.data && data.data.messageId) || (msgToSave.meta && msgToSave.meta.messageId) || null,
+            status: 'delivered'
+          };
+
+          // Отправляем на сервер; credentials: 'include' чтобы cookie (pwa_session) попал на сервер
+          const resp = await fetch('/push-received', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(notifyBody)
+          });
+
+          if (resp && resp.ok) {
+            console.log('[SW] notify /push-received ok', await resp.json().catch(() => null));
+          } else {
+            console.warn('[SW] notify /push-received failed', resp && resp.status);
+          }
+        } catch (e) {
+          console.warn('[SW] notify /push-received exception', e && (e.stack || e));
+        }
+      })();
     } catch (e) {
       console.warn('[SW] failed to save push payload to IDB', e && (e.stack || e));
     }
