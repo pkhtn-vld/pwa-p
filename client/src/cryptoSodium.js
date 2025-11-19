@@ -167,20 +167,45 @@ export async function updateMessageDeliveryStatus(recipient, ts, status) {
   try {
     const db = await open();
     const me = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
+
+    // Нормализуем входные параметры для сравнения
+    const targetTo = String(recipient || '').toLowerCase();
+    const targetTsNum = Number(ts || 0);
+
+    // Получаем все сообщения (не очень эффективно, но совпадает с текущей схемой IDB)
     const all = await db.getAll(STORE_MESSAGES);
-    // найдём запись: from = me, to = recipient, ts = ts и meta.localCopy = true
-    const rec = all.find(r =>
-      String(r.from || '').toLowerCase() === me &&
-      String(r.to || '').toLowerCase() === String(recipient || '').toLowerCase() &&
-      Number(r.ts || 0) === Number(ts) &&
-      r.meta && r.meta.localCopy
-    );
-    if (!rec) return false;
-    rec.meta = rec.meta || {};
-    rec.meta.delivery = status; // 'pending'|'sent'|'read'|'failed'
-    await db.put(STORE_MESSAGES, rec);
-    console.log('[msg] updated delivery status in IDB', { to: recipient, ts, status });
-    return true;
+
+    // Найдём все соответствующие записи — обновим их все
+    let updatedCount = 0;
+    for (const r of all) {
+      try {
+        const rFrom = String(r.from || '').toLowerCase();
+        const rTo = r.to ? String(r.to).toLowerCase() : (r.to === null ? null : '');
+        const rTsNum = Number(r.ts || 0);
+
+        // Совпадение: локальная копия отправленного сообщения от меня к recipient и совпадающий ts
+        // Поддерживаем старые и новые флаги: meta.localCopy или meta.sentByMe (если вдруг)
+        const isLocalCopy = r.meta && (r.meta.localCopy === true || r.meta.sentByMe === true);
+
+        if (rFrom === me && rTo === targetTo && rTsNum === targetTsNum && isLocalCopy) {
+          r.meta = r.meta || {};
+          r.meta.delivery = String(status || '').toLowerCase(); // 'pending'|'delivered'|'read'|'failed'
+          r.meta.deliveryUpdatedAt = Date.now();
+          await db.put(STORE_MESSAGES, r);
+          updatedCount++;
+        }
+      } catch (innerE) {
+        console.warn('[msg] update loop item failed', innerE && innerE.message ? innerE.message : innerE);
+      }
+    }
+
+    if (updatedCount > 0) {
+      console.log('[msg] updated delivery status in IDB', { to: recipient, ts, status, updatedCount });
+      return true;
+    } else {
+      console.log('[msg] updateMessageDeliveryStatus: no matching localCopy found', { to: recipient, ts, status });
+      return false;
+    }
   } catch (e) {
     console.warn('[msg] updateMessageDeliveryStatus failed', e && e.message ? e.message : e);
     return false;

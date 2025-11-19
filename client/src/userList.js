@@ -880,16 +880,19 @@ async function sendChatMessage() {
 }
 
 // для получения входящих сообщений из auth.js (presence listener) 
+// для получения входящих сообщений из auth.js (presence listener) 
 export async function handleIncomingMessage(fromUserKey, payload) {
   try {
-
     if (!payload) return false;
     const from = String(fromUserKey || '').toLowerCase();
 
+    // Обработка chat_receipt (пришедшего от получателя в ответ на наши отправленные сообщения)
     if (payload.type === 'chat_receipt') {
       // payload: { ts, status }  where status is 'delivered' | 'read' | 'failed'
       const ts = payload.ts;
-      const status = payload.status; // ожидаем 'delivered'|'read'|'failed'
+      const status = String(payload.status || '').toLowerCase(); // 'delivered'|'read'|'failed'
+
+      console.log('[incoming][receipt] from=', from, 'ts=', ts, 'status=', status);
 
       // Обновим in-memory currentChat.messages если открыт чат с этим пользователем
       if (currentChat && currentChat.userKey === from) {
@@ -900,6 +903,7 @@ export async function handleIncomingMessage(fromUserKey, payload) {
             if (status === 'read') m.delivery = 'read';
             else if (status === 'delivered') m.delivery = 'delivered';
             else m.delivery = status || m.delivery;
+            console.log('[incoming][receipt] updated in-memory message', { idx: i, ts: m.ts, newDelivery: m.delivery });
             break;
           }
         }
@@ -907,28 +911,41 @@ export async function handleIncomingMessage(fromUserKey, payload) {
       }
 
       // Также обновим IDB (передаём тот же синтаксис)
-      try { await updateMessageDeliveryStatus(from, ts, status === 'read' ? 'read' : (status === 'delivered' ? 'delivered' : status)); } catch (e) { /* ignore */ }
+      try {
+        const dbResult = await updateMessageDeliveryStatus(from, ts, status === 'read' ? 'read' : (status === 'delivered' ? 'delivered' : status));
+        console.log('[incoming][receipt] updateMessageDeliveryStatus result:', dbResult);
+      } catch (e) {
+        console.warn('[incoming][receipt] updateMessageDeliveryStatus threw', e && e.message ? e.message : e);
+      }
       return true;
     }
 
+    // Обработка входящего chat_message
     if (!payload || payload.type !== 'chat_message') return false;
+
+    // Вычислим корректный ts для сохранения — критично использовать одну и ту же переменную и для сохранения, и для отправки receipt.
+    // Если сервер прислал payload.ts — используем его. Иначе генерируем локально и будем им оперировать.
+    const messageTs = (typeof payload.ts !== 'undefined' && payload.ts !== null) ? Number(payload.ts) : Date.now();
 
     const me = (localStorage.getItem('pwaUserName') || '').trim();
     const shouldMarkRead = !!(currentChat && currentChat.userKey === from);
 
-    // сохраним и дождёмся записи
+    console.log('[incoming][message] from=', from, 'ts=', messageTs, 'encrypted=', !!payload.encrypted, 'shouldMarkRead=', shouldMarkRead);
+
+    // Сохраняем запись в IDB с заранее вычисленным messageTs
     try {
       await saveMessageLocal({
         from,
         to: me,
         text: payload.encrypted ? payload.text : String(payload.text || ''),
         encrypted: !!payload.encrypted,
-        ts: payload.ts || Date.now(),
+        ts: messageTs,
         meta: { deliveredVia: 'ws' },
         read: shouldMarkRead
       });
+      console.log('[incoming][message] saved to IDB', { from, ts: messageTs, read: shouldMarkRead });
     } catch (e) {
-      console.warn('[incoming] failed to save message to IDB', e);
+      console.warn('[incoming][message] failed to save message to IDB', e && e.message ? e.message : e);
     }
 
     // Если чат открыт — отрисуем (неблокирующе)
@@ -938,20 +955,34 @@ export async function handleIncomingMessage(fromUserKey, payload) {
           if (payload.encrypted) {
             try {
               const plain = await decryptOwn(payload.text);
-              currentChat.messages.push({ outgoing: false, text: plain, ts: payload.ts || Date.now() });
+              currentChat.messages.push({ outgoing: false, text: plain, ts: messageTs });
+              console.log('[incoming][message] decrypted and appended to in-memory messages', { ts: messageTs });
             } catch (e) {
-              currentChat.messages.push({ outgoing: false, text: '[Зашифровано]', ts: payload.ts || Date.now() });
+              currentChat.messages.push({ outgoing: false, text: '[Зашифровано]', ts: messageTs });
+              console.warn('[incoming][message] decrypt failed, appended placeholder', e && e.message ? e.message : e);
             }
           } else {
-            currentChat.messages.push({ outgoing: false, text: String(payload.text || ''), ts: payload.ts || Date.now() });
+            currentChat.messages.push({ outgoing: false, text: String(payload.text || ''), ts: messageTs });
           }
           renderMessages();
         } catch (e) { console.error(e); }
       })();
+
+      // Если чат открыт — пометим прочитанным и отправим receipt 'read'
+      try {
+        if (presenceClient && typeof presenceClient.sendSignal === 'function') {
+          const receiptPayload = { type: 'chat_receipt', ts: messageTs, status: 'read' };
+          const ok = presenceClient.sendSignal(from, receiptPayload);
+          console.log('[incoming][message] sent read-receipt (chat open)', { to: from, ts: messageTs, ok });
+        }
+      } catch (e) {
+        console.warn('[incoming][message] failed to send read receipt', e && e.message ? e.message : e);
+      }
+
       return true;
     }
 
-    // чат закрыт — теперь запись гарантированно в IDB -> обновим бейдж
+    // Чат закрыт — обновим бейдж и отправим delivered receipt
     try {
       await updateUnreadBadge(from);
       const row = document.querySelector(`.user-row[data-userkey="${from}"]`);
@@ -966,15 +997,13 @@ export async function handleIncomingMessage(fromUserKey, payload) {
     try {
       if (presenceClient && typeof presenceClient.sendSignal === 'function') {
         const receiptStatus = shouldMarkRead ? 'read' : 'delivered'; // если чат открыт — read, иначе delivered
-        try {
-          const receiptPayload = { type: 'chat_receipt', ts: payload.ts, status: receiptStatus };
-          presenceClient.sendSignal(from, receiptPayload);
-          console.log('[receipt] sent', receiptPayload, 'to', from);
-        } catch (e) {
-          console.warn('[receipt] failed to send receipt', e && e.message ? e.message : e);
-        }
+        const receiptPayload = { type: 'chat_receipt', ts: messageTs, status: receiptStatus };
+        const ok = presenceClient.sendSignal(from, receiptPayload);
+        console.log('[incoming] sent', receiptPayload, 'to', from, 'ok=', ok);
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      console.warn('[receipt] failed to send receipt', e && e.message ? e.message : e);
+    }
 
     return false;
   } catch (e) {
