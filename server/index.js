@@ -31,6 +31,7 @@ const WEBDAV_USER = process.env.WEBDAV_USER || '';
 const WEBDAV_PASS = process.env.WEBDAV_PASS || '';
 
 let webdavClient = null;
+let presenceObj = null;
 if (WEBDAV_USER && WEBDAV_PASS) {
   webdavClient = createWebdavClient(WEBDAV_BASE, { username: WEBDAV_USER, password: WEBDAV_PASS });
 }
@@ -803,7 +804,7 @@ app.use((req, res) => {
 
     // перед стартом: передаём функцию getSessionById
     // Сохраняем возвращаемый объект, чтобы иметь доступ к clientsByUser для отправки receipts из HTTP-эндпойнта.
-    const presenceObj = attachPresence(server, {
+    presenceObj = attachPresence(server, {
       getSessionById: (sessionId) => sessions[sessionId] || null,
       onSignal: async (from, to, payload, delivered) => {
         console.log('signal', from, '->', to, 'delivered=', delivered);
