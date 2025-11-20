@@ -9,7 +9,7 @@ const { attachPresence } = require('./services/presenceService');
 const { startSessionCleaner } = require('./services/sessionCleaner');
 const { startup } = require('./startup');
 const { handleSignal } = require('./services/signalHandler');
-const { sessionModule } = require('./routes/session');
+const sessionModule = require('./routes/session');
 
 // инициализация сервера и восстановление состояния при старте
 (async () => {
