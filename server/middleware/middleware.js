@@ -76,7 +76,7 @@ function setupMiddleware(app) {
   app.set('trust proxy', 1);  // доверяем заголовкам X-Forwarded-*
   app.use(corsMiddleware());
   app.use(express.json({ limit: '128kb' }));  // парсим JSON‑тело запросов, ограничиваем размер до 128 килобайт
-  app.use(express.static(path.join(__dirname, '../dist'))); // раздаём статические файлы фронтенда из папки dist/
+  app.use(express.static(path.join(__dirname, '..', '..', 'dist'))); // раздаём статические файлы фронтенда из папки dist/
   app.use(requestLogger); // to dev
 }
 
