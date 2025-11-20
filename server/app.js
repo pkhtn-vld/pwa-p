@@ -1,7 +1,7 @@
 // --- сборка express‑приложения
 
 const express = require('express');
-const path = require('path');
+// const path = require('path');
 
 const { setupMiddleware } = require('./middleware/middleware');
 const setupRoutes = require('./routes');
@@ -15,8 +15,8 @@ setupMiddleware(app);
 setupRoutes(app);
 
 // если путь не совпал ни с одним API, отдать index.html
-app.use((req, res) => {
-  res.sendFile(path.join(__dirname, '../dist/index.html'));
-});
+// app.use((req, res) => {
+//   res.sendFile(path.join(__dirname, '../dist/index.html'));
+// });
 
 module.exports = app;
