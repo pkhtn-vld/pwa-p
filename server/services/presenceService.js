@@ -5,10 +5,12 @@ function attachPresence(httpServer, opts = {}) {
   const clientsByUser = new Map();
 
   wss.on('connection', (ws, req) => {
+
+    // to dev
     // подробное логирование WebSocket handshake
-    try {
-      console.log(`[WS CONNECT] ${new Date().toISOString()} path=${req.url} origin=${req.headers.origin || ''} cookie=${req.headers.cookie || ''} remote=${req.socket && req.socket.remoteAddress}`);
-    } catch (e) { }
+    // try {
+    //   console.log(`[WS CONNECT] ${new Date().toISOString()} path=${req.url} origin=${req.headers.origin || ''} cookie=${req.headers.cookie || ''} remote=${req.socket && req.socket.remoteAddress}`);
+    // } catch (e) { }
 
     let sessionId = null;
 
@@ -19,8 +21,9 @@ function attachPresence(httpServer, opts = {}) {
       if (m) sessionId = m.split('=')[1];
     }
 
+    // to dev
     // логируем найденный sessionId (может быть null)
-    try { console.log('[WS] resolved sessionId=', sessionId); } catch (e) { }
+    // try { console.log('[WS] resolved sessionId=', sessionId); } catch (e) { }
 
     // проверка Origin: если указана опция expectedOrigin, блокируем другие
     if (opts.expectedOrigin && req.headers && req.headers.origin) {
@@ -125,8 +128,6 @@ function attachPresence(httpServer, opts = {}) {
           }
           if (visibleOpenCount  > 0) delivered = true;
         }
-
-        console.log(`[signal] from=${ws._meta.userKey} to=${toKey} targets=${targets ? targets.size : 0} open=${openCount} delivered=${delivered}`);
 
         if (opts.onSignal) {
           try { opts.onSignal(ws._meta.userKey, toKey, msg.payload || null, delivered); } catch (e) { /* ignore */ }

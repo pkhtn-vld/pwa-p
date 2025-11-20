@@ -81,7 +81,6 @@ async function uploadToWebdav(localPath, remotePath) {
 
     const content = await fsp.readFile(localPath);
     await state.webdavClient.putFileContents(remotePath, content, { overwrite: true });
-    console.log('WebDAV: uploaded', remotePath);
   } catch (e) {
     // если 409 — попробуем создать директорию и повторить
     const msg = e && e.message ? e.message : String(e);
@@ -91,7 +90,6 @@ async function uploadToWebdav(localPath, remotePath) {
         await ensureRemoteDir(dir);
         const content = await fsp.readFile(localPath);
         await state.webdavClient.putFileContents(remotePath, content, { overwrite: true });
-        console.log('WebDAV: uploaded after mkdir', remotePath);
         return;
       } catch (ee) {
         console.error('WebDAV upload retry failed', remotePath, ee && ee.message);
@@ -108,7 +106,6 @@ async function downloadFromWebdavIfMissing(localPath, remotePath) {
     const data = await state.webdavClient.getFileContents(remotePath);
     if (data) {
       await fsp.writeFile(localPath, data);
-      console.log('WebDAV: restored', remotePath, '->', localPath);
       return true;
     }
   } catch (e) {

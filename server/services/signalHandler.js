@@ -8,14 +8,6 @@ const { persistSubscriptions } = require('./dataStore');
  * Вызывается при каждом входящем signal‑сообщении.
  */
 async function handleSignal(from, to, payload, delivered) {
-  console.log('signal', from, '->', to, 'delivered=', delivered);
-  console.log('payload: ', payload);
-  console.log('onSignal:', {
-    from,
-    to,
-    delivered,
-    text: (payload && payload.text) ? String(payload.text).slice(0, 50) : ''
-  });
 
   // если сообщение не было доставлено через WS — отправим web‑push подписчикам получателя
   if (!delivered) {
@@ -34,10 +26,6 @@ async function handleSignal(from, to, payload, delivered) {
         }
       }
 
-      console.log('-> will send webpush, subsCount=', uniq.length,
-        'toKey=', toKey,
-        'endpoints=', uniq.map(s => (s.endpoint || '').slice(0, 80)));
-
       if (uniq.length > 0) {
         const pushPayload = JSON.stringify({
           title: `Новое сообщение от ${from.charAt(0).toUpperCase() + from.slice(1)}`,
@@ -48,7 +36,6 @@ async function handleSignal(from, to, payload, delivered) {
         await Promise.all(uniq.map(async (s) => {
           try {
             await webpush.sendNotification(s, pushPayload);
-            console.log('webpush sent to', (s.endpoint || '').slice(0, 80));
           } catch (err) {
             console.error('webpush send error', err && err.statusCode);
             // удалить подписку при 410 Gone

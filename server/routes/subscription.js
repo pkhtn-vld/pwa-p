@@ -19,8 +19,6 @@ router.post('/subscribe', async (req, res) => {
     const body = req.body || {};
     const subscription = body.subscription || body;
 
-    console.log('POST /subscribe resolved userKey=', userKey, 'subscription present=', !!subscription && !!subscription.endpoint);
-
     if (!subscription || !subscription.endpoint) {
       console.warn('subscribe: invalid subscription body');
       return res.status(400).json({ error: 'Invalid subscription' });
@@ -39,7 +37,6 @@ router.post('/subscribe', async (req, res) => {
       }
     }
 
-    console.log('Subscription saved for', userKey, 'totalSubs=', subscriptionsByUser[userKey].length);
     return res.status(201).json({ ok: true });
   } catch (e) {
     console.error('subscribe error', e && e.stack || e);
@@ -96,8 +93,6 @@ router.post('/push-received', async (req, res) => {
       return res.status(400).json({ error: 'from required' });
     }
 
-    console.log('[push-received] recip=', recipient, '-> notifying sender=', fromRaw, 'ts=', messageTs, 'messageId=', messageId, 'status=', status);
-
     // попытка послать chat_receipt отправителю по WS
     try {
       const senderKey = fromRaw;
@@ -123,8 +118,6 @@ router.post('/push-received', async (req, res) => {
           }
         }
       }
-
-      console.log('[push-received] targets=', targets ? targets.size : 0, 'open=', openCount, 'visibleOpen=', visibleOpenCount);
 
       // Возвращаем успех в любом случае (если отправитель не в сети — сервер ничего не должен ломать)
       return res.json({ ok: true, sentToOpen: visibleOpenCount > 0 });
