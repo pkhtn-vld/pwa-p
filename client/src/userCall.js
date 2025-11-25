@@ -140,47 +140,83 @@ export async function initiateCallTo(userKey) {
     const callId = makeId();
     const outgoingUI = showOutgoingUI(callId, to);
 
-    const pc = new RTCPeerConnection();
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' }
+      ]
+    });
+
+    // Логи состояний для отладки
+    pc.oniceconnectionstatechange = () => console.log('[call][init] oniceconnectionstatechange', callId, pc.iceConnectionState);
+    pc.onconnectionstatechange = () => console.log('[call][init] onconnectionstatechange', callId, pc.connectionState);
+    pc.onicegatheringstatechange = () => console.log('[call][init] onicegatheringstatechange', callId, pc.iceGatheringState);
+
     let localStream;
     try {
       localStream = await acquireMic();
+      console.log('[call][init] acquired localStream, audio tracks:', localStream.getAudioTracks());
     } catch (e) {
       removeUI(outgoingUI);
       localToast('Доступ к микрофону отклонён');
+      console.warn('[call][init] getUserMedia failed', e);
       return;
     }
+
+    // добавляем локальные треки до создания offer
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
+    // ICE кандидаты — отправляем в JSON форме и логируем
     pc.onicecandidate = (ev) => {
-      if (ev.candidate) {
-        try { state.presenceClient.sendSignal(to, { type: 'call_candidate', callId, candidate: ev.candidate }); } catch (e) {}
+      if (ev && ev.candidate) {
+        try {
+          const cand = ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate;
+          console.log('[call][init] sending candidate', callId, cand);
+          state.presenceClient.sendSignal(to, { type: 'call_candidate', callId, candidate: cand });
+        } catch (err) {
+          console.warn('[call][init] send candidate failed', err);
+        }
       }
     };
 
+    // ontrack — воспроизводим и явно play()
     pc.ontrack = (ev) => {
-      // простая реализация: создаём аудио элемент
-      let audio = document.getElementById('call-audio-' + callId);
-      if (!audio) {
-        audio = document.createElement('audio');
-        audio.id = 'call-audio-' + callId;
-        audio.autoplay = true;
-        audio.style.display = 'none';
-        document.body.appendChild(audio);
+      try {
+        let audio = document.getElementById('call-audio-' + callId);
+        if (!audio) {
+          audio = document.createElement('audio');
+          audio.id = 'call-audio-' + callId;
+          audio.autoplay = true;
+          audio.playsInline = true;
+          audio.style.display = 'none';
+          document.body.appendChild(audio);
+        }
+        audio.muted = false;
+        audio.volume = 1.0;
+        audio.srcObject = (ev.streams && ev.streams[0]) || ev.stream || null;
+        console.log('[call][init] ontrack set srcObject', callId, audio.srcObject);
+        audio.play().then(() => {
+          console.log('[call][init] audio.play OK', callId);
+        }).catch((err) => {
+          console.warn('[call][init] audio.play failed', callId, err);
+        });
+      } catch (e) {
+        console.error('[call][init] ontrack handler failed', callId, e);
       }
-      audio.srcObject = ev.streams[0];
     };
 
     // create offer
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    console.log('[call][init] created offer, local SDP length:', (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0);
 
     activeCalls.set(callId, { pc, localStream, role: 'caller', to, uiIds: { outgoing: outgoingUI } });
 
-    // send offer via presenceClient
+    // send offer via presenceClient (sdp string)
     try {
       state.presenceClient.sendSignal(to, { type: 'call_offer', callId, sdp: offer.sdp });
+      console.log('[call][init] sent call_offer', callId, 'to', to);
     } catch (e) {
-      console.warn('sendSignal call_offer failed', e);
+      console.warn('[call][init] sendSignal call_offer failed', e);
     }
 
     // set timeout for no-answer
@@ -200,58 +236,109 @@ export async function initiateCallTo(userKey) {
 }
 
 // Принятие входящего звонка (вызывается при клике "Принять")
+// --- Заменить существующую функцию acceptCall на эту версию ---
 async function acceptCall(from, callId) {
   try {
     const info = activeCalls.get(callId) || {};
-    // создаём pc и local stream
-    const pc = new RTCPeerConnection();
+
+    // создаём pc с STUN (как у инициатора)
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' }
+        // при необходимости добавь TURN здесь
+      ]
+    });
+
+    // Логи состояний для отладки
+    pc.oniceconnectionstatechange = () => console.log('[call][accept] oniceconnectionstatechange', callId, pc.iceConnectionState);
+    pc.onconnectionstatechange = () => console.log('[call][accept] onconnectionstatechange', callId, pc.connectionState);
+    pc.onicegatheringstatechange = () => console.log('[call][accept] onicegatheringstatechange', callId, pc.iceGatheringState);
+
     let localStream;
     try {
       localStream = await acquireMic();
+      console.log('[call][accept] acquired localStream, audio tracks:', localStream.getAudioTracks());
     } catch (e) {
       localToast('Нужен доступ к микрофону');
+      console.warn('[call][accept] getUserMedia failed', e);
       // уведомим remote
       try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'media_denied' }); } catch (e) {}
       cleanupCall(callId);
       return;
     }
+
+    // добавляем локальные треки до/после — безопасно добавить сейчас
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
+    // ICE кандидаты — отправляем в JSON форме и логируем
     pc.onicecandidate = (ev) => {
-      if (ev.candidate) {
-        try { state.presenceClient.sendSignal(from, { type: 'call_candidate', callId, candidate: ev.candidate }); } catch (e) {}
+      if (ev && ev.candidate) {
+        try {
+          const cand = ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate;
+          console.log('[call][accept] sending candidate', callId, cand);
+          state.presenceClient.sendSignal(from, { type: 'call_candidate', callId, candidate: cand });
+        } catch (err) {
+          console.warn('[call][accept] send candidate failed', err);
+        }
       }
     };
+
+    // ontrack — воспроизводим и явно play()
     pc.ontrack = (ev) => {
-      let audio = document.getElementById('call-audio-' + callId);
-      if (!audio) {
-        audio = document.createElement('audio');
-        audio.id = 'call-audio-' + callId;
-        audio.autoplay = true;
-        audio.style.display = 'none';
-        document.body.appendChild(audio);
+      try {
+        let audio = document.getElementById('call-audio-' + callId);
+        if (!audio) {
+          audio = document.createElement('audio');
+          audio.id = 'call-audio-' + callId;
+          audio.autoplay = true;
+          audio.playsInline = true;
+          audio.style.display = 'none';
+          document.body.appendChild(audio);
+        }
+        audio.muted = false;
+        audio.volume = 1.0;
+        // ev.streams[0] наиболее надёжен; fallback ev.stream
+        audio.srcObject = (ev.streams && ev.streams[0]) || ev.stream || null;
+        console.log('[call][accept] ontrack set srcObject', callId, audio.srcObject);
+        // попытка play (обычно вызвана кликом "Принять" — политика автоплей должна разрешить)
+        audio.play().then(() => {
+          console.log('[call][accept] audio.play OK', callId);
+        }).catch((err) => {
+          console.warn('[call][accept] audio.play failed', callId, err);
+        });
+      } catch (e) {
+        console.error('[call][accept] ontrack handler failed', callId, e);
       }
-      audio.srcObject = ev.streams[0];
     };
 
     // set remote (offer) if present
     if (!info.offerSdp) {
-      // если offer ещё не пришёл/записан — отклоняем
-      localToast('Offer не найден, отклоняю');
+      // если offer ещё не пришёл/записан — отклоняем с логом
+      console.warn('[call][accept] no offerSdp for callId', callId, 'from', from);
       try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'no_offer' }); } catch (e) {}
       cleanupCall(callId);
       return;
     }
 
+    console.log('[call][accept] setting remoteDescription (offer) for', callId);
     await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: info.offerSdp }));
+    console.log('[call][accept] remoteDescription set, creating answer', callId);
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    console.log('[call][accept] localDescription (answer) set, local SDP length:', (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0);
 
-    // send answer
-    try { state.presenceClient.sendSignal(from, { type: 'call_answer', callId, sdp: answer.sdp }); } catch (e) { console.warn('sendSignal call_answer failed', e); }
+    // send answer (sdp)
+    try {
+      state.presenceClient.sendSignal(from, { type: 'call_answer', callId, sdp: answer.sdp });
+      console.log('[call][accept] sent call_answer', callId);
+    } catch (e) {
+      console.warn('[call][accept] sendSignal call_answer failed', e);
+    }
 
     // update state
     activeCalls.set(callId, { ...info, pc, localStream, role: 'callee' });
+
     // remove incoming UI
     if (info.uiIds && info.uiIds.incoming) removeUI(info.uiIds.incoming);
     localToast('Звонок принят');
