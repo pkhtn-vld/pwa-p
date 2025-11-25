@@ -111,3 +111,56 @@ export function checkInstallMarker() {
     return false;
   }
 }
+
+// проверяет, совпадают ли два таймстампа по дате (год, месяц, день).
+export function isSameDay(tsA, tsB) {
+  if (!tsA || !tsB) return false;
+  const a = new Date(Number(tsA));
+  const b = new Date(Number(tsB));
+  return a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+}
+
+// проверяет, соответствует ли таймстамп вчерашнему дню.
+function isYesterday(ts) {
+  const d = new Date(Number(ts));
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  return d.getFullYear() === yesterday.getFullYear() &&
+    d.getMonth() === yesterday.getMonth() &&
+    d.getDate() === yesterday.getDate();
+}
+
+// возвращает время из таймстампа в формате HH:MM (например, "12:07").
+export function formatTimeOnly(ts) {
+  const d = new Date(Number(ts));
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return hh + ':' + mm;
+}
+
+// Возвращает заголовок даты в виде: "Сегодня", "Вчера", или "1 нояб. 2025"
+export function formatDateHeader(ts) {
+  if (!ts) return '';
+  if (isSameDay(ts, Date.now())) return 'Сегодня';
+  if (isYesterday(ts)) return 'Вчера';
+  const d = new Date(Number(ts));
+
+  // компактный формат: "01 нояб. 2025" (локаль берём из браузера)
+  try {
+    const locale = navigator.language || 'ru-RU';
+    // получаем день и короткое название месяца
+    const day = d.getDate();
+    const month = d.toLocaleString(locale, { month: 'short' });
+    const year = d.getFullYear();
+    return `${day} ${month} ${year}`;
+  } catch (e) {
+    return d.toLocaleDateString();
+  }
+}
+
+// нормализует ключ пользователя для хранения (везде используем lowerCase)
+export function normKey(k) {
+  return (String(k || '')).toLowerCase();
+}

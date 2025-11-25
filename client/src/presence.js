@@ -1,40 +1,39 @@
 // --- активность пользователя
 
 import { updateOnlineList, setPresenceClient, handleIncomingMessage, showInAppToast } from "./userList.js";
-
-let pc = null;
+import { state, setPresenceClient } from './state.js';
 
 // создаёт клиента, подключает его и синхронизирует с видимостью страницы
 export async function ensurePresenceClient() {
-  if (pc) return pc;
-  pc = createPresenceClient();
+  if (state.presenceClient) return state.presenceClient;
+  state.presenceClient = createPresenceClient();
   // Попытка подключиться немедленно, если уже есть сессия
-  await pc.connectWhenAuth();
+  await state.presenceClient.connectWhenAuth();
 
   try {
     // отправим текущее состояние (будет буферизовано, если ws ещё не открыт)
-    sendVisibilityState(pc, document.visibilityState === 'visible');
+    sendVisibilityState(state.presenceClient, document.visibilityState === 'visible');
 
     // слушаем изменения видимости
     document.addEventListener('visibilitychange', () => {
       const isVisible = document.visibilityState === 'visible';
-      sendVisibilityState(pc, isVisible);
+      sendVisibilityState(state.presenceClient, isVisible);
     }, { passive: true });
 
     // pagehide — попытка отправить перед закрытием/сворачиванием
     window.addEventListener('pagehide', () => {
-      try { sendVisibilityState(pc, false); } catch (e) { }
+      try { sendVisibilityState(state.presenceClient, false); } catch (e) { }
     });
 
     // опционально: beforeunload (меньше шансов успеха, но лучше попытаться)
     window.addEventListener('beforeunload', () => {
-      try { sendVisibilityState(pc, false); } catch (e) { }
+      try { sendVisibilityState(state.presenceClient, false); } catch (e) { }
     });
   } catch (e) { console.warn('visibility hook failed', e); }
 
-  setPresenceClient(pc);
-  attachPresenceListeners(pc);
-  return pc;
+  setPresenceClient(state.presenceClient);
+  attachPresenceListeners(state.presenceClient);
+  return state.presenceClient;
 }
 
 // создаёт WebSocket‑клиент для отслеживания онлайн‑статуса и сигналов

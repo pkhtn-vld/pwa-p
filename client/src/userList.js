@@ -8,18 +8,12 @@ import {
   fetchAndCachePubkey,
   updateMessageDeliveryStatus
 } from './cryptoSodium.js';
+import { state } from './state.js';
+import { isSameDay, formatTimeOnly, formatDateHeader, normKey } from './utils.js';
+import { createTopBarIfMissing } from './ui.js';
 
-let presenceClient = null;
-let currentChat = null; // { userKey, displayName, messages: [] }
-let onlineSet = new Set();
-let currentOpenChatUserKey = null;
 
-// Нормализует ключ пользователя для хранения (везде используем lowerCase)
-function normKey(k) {
-  return (String(k || '')).toLowerCase();
-}
-
-// Открыть БД pwa-chat и вернуть Promise<db>
+// открыть БД pwa-chat и вернуть Promise<db>
 function openChatDB() {
   return new Promise((resolve, reject) => {
     try {
@@ -36,14 +30,7 @@ function openChatDB() {
   });
 }
 
-/**
- * Посчитать количество непрочитанных сообщений от userKey
- * Условие непрочитанного: rec.read !== true && (
- *    (rec.to === me && rec.from === userKey) ||
- *    (rec.meta && rec.meta.via === 'push' && rec.from === userKey)
- * )
- * Возвращает Promise<number>
- */
+// посчитать количество непрочитанных сообщений от userKey
 function countUnreadFor(userKey) {
   return new Promise(async (resolve) => {
     try {
@@ -81,11 +68,7 @@ function countUnreadFor(userKey) {
   });
 }
 
-/**
- * Пометить все сообщения для userKey как прочитанные (read=true).
- * Помечаем записи, где (from === userKey && to === me) || (meta.via==='push' && from === userKey)
- * Возвращает Promise<void>
- */
+// пометить все сообщения для userKey как прочитанные (read=true)
 export function markAllReadFor(userKey) {
   return new Promise(async (resolve) => {
     try {
@@ -109,7 +92,7 @@ export function markAllReadFor(userKey) {
             } catch (e) { /* ignore */ }
 
             // После успешного обновления в IDB — отправляем read receipts.
-            // Если presenceClient отсутствует — sendSignal вернёт false или буферизует в клиенте,
+            // Если state.presenceClient отсутствует — sendSignal вернёт false или буферизует в клиенте,
             // но мы по крайней мере сделали попытку отправки и залогировали это.
             (async () => {
               if (!changedTs.length) {
@@ -122,12 +105,12 @@ export function markAllReadFor(userKey) {
 
               for (const t of changedTs) {
                 try {
-                  if (presenceClient && typeof presenceClient.sendSignal === 'function') {
+                  if (state.presenceClient && typeof state.presenceClient.sendSignal === 'function') {
                     const payload = { type: 'chat_receipt', ts: Number(t), status: 'read' };
-                    const ok = presenceClient.sendSignal(k, payload);
+                    const ok = state.presenceClient.sendSignal(k, payload);
                     console.log('[markAllReadFor] sent read receipt attempt', { to: k, ts: t, ok });
                   } else {
-                    console.warn('[markAllReadFor] no presenceClient to send receipt to', k, t);
+                    console.warn('[markAllReadFor] no state.presenceClient to send receipt to', k, t);
                   }
                 } catch (e) {
                   console.warn('[markAllReadFor] failed to send read receipt', { to: k, ts: t, err: e && e.message ? e.message : e });
@@ -163,7 +146,7 @@ export function markAllReadFor(userKey) {
       };
 
       req.onerror = function (err) {
-        try { db.close(); } catch (e) {}
+        try { db.close(); } catch (e) { }
         console.warn('[markAllReadFor] cursor error', err);
         resolve();
       };
@@ -176,10 +159,7 @@ export function markAllReadFor(userKey) {
 
 // DOM-обновления бейджа (на основе IDB)
 
-/**
- * Обновляет бейдж для одного userKey, считая из IDB.
- * Возвращает Promise<void>.
- */
+// обновляет бейдж для одного userKey, считая из IDB
 export function updateUnreadBadge(userKey) {
   try {
     const k = normKey(userKey);
@@ -222,19 +202,16 @@ export function updateUnreadBadge(userKey) {
   }
 }
 
-/**
- * Инициализация: сканируем IDB и сразу обновляем бейджи (вызов при старте приложения).
- * Возвращает Promise<void>.
- */
+// инициализация: сканируем IDB и сразу обновляем бейджи
 export async function initUnreadFromIDB() {
   try {
-    await updateAllBadges();
+    updateAllBadges();
   } catch (e) {
     console.warn('[unread] initUnreadFromIDB error', e);
   }
 }
 
-// Обновить бейджи для всех user-row'ов (вызывается после renderUserList или при старте).
+// Обновить бейджи для всех user-row'ов
 export function updateAllBadges() {
   try {
     const rows = document.querySelectorAll('.user-row');
@@ -245,13 +222,13 @@ export function updateAllBadges() {
   } catch (e) { /* ignore */ }
 }
 
-// экспорт функции проверки
+// проверка открыт ли чат с userKey
 export function isChatOpenWith(userKey) {
   if (!userKey) return false;
-  return String(currentOpenChatUserKey || '').toLowerCase() === String(userKey || '').toLowerCase();
+  return String(state.currentOpenChatUserKey || '').toLowerCase() === String(userKey || '').toLowerCase();
 }
 
-// Простейший in-app toast (замените на ваш компонент/стиль)
+// всплывающие сообщения
 export function showInAppToast(title, meta = {}) {
   try {
     const id = 'inapp-toast';
@@ -280,13 +257,9 @@ export function showInAppToast(title, meta = {}) {
   }
 }
 
-export function setPresenceClient(pc) {
-  presenceClient = pc;
-}
-
 // экспорт функции обновления статусов
 export function updateOnlineList(onlineArray) {
-  onlineSet = new Set((onlineArray || []).map(x => String(x).toLowerCase()));
+  state.onlineSet = new Set((onlineArray || []).map(x => String(x).toLowerCase()));
   const container = document.getElementById('userList');
   if (!container) return;
   const rows = container.querySelectorAll('.user-row');
@@ -294,13 +267,13 @@ export function updateOnlineList(onlineArray) {
     const userKey = row.getAttribute('data-userkey') || '';
     const dot = row.querySelector('.status-dot');
     if (dot) {
-      dot.style.color = onlineSet.has(userKey.toLowerCase()) ? '#28a745' : '#9AA0A6';
+      dot.style.color = state.onlineSet.has(userKey.toLowerCase()) ? '#28a745' : '#9AA0A6';
     }
   });
 
   // Если открыт чат — обновим статус в заголовке чата (если совпадает)
-  if (currentChat && currentChat.userKey) {
-    updateChatStatusDot(currentChat.userKey);
+  if (state.currentChat && state.currentChat.userKey) {
+    updateChatStatusDot(state.currentChat.userKey);
   }
 }
 
@@ -310,62 +283,13 @@ function updateChatStatusDot(userKey) {
     if (!userKey) return;
     const dot = document.getElementById('chatStatusDot');
     if (!dot) return;
-    const isOnline = onlineSet.has(String(userKey).toLowerCase());
+    const isOnline = state.onlineSet.has(String(userKey).toLowerCase());
     dot.style.color = isOnline ? '#28a745' : '#9AA0A6';
     dot.title = isOnline ? 'онлайн' : 'оффлайн';
   } catch (e) { /* ignore */ }
 }
 
-function createTopBarIfMissing() {
-  let top = document.getElementById('topBar');
-  if (top) return top;
-
-  top = document.createElement('div');
-  top.id = 'topBar';
-
-  // left: current user info
-  const left = document.createElement('div');
-  left.id = 'topBarLeft';
-
-  const avatar = document.createElement('div');
-  avatar.id = 'topBarAvatar';
-
-  const nameEl = document.createElement('div');
-  nameEl.id = 'topBarName';
-
-  const statusEl = document.createElement('div');
-  statusEl.id = 'topBarStatus';
-
-  const leftWrap = document.createElement('div');
-  leftWrap.style.display = 'flex';
-  leftWrap.style.flexDirection = 'column';
-  leftWrap.appendChild(nameEl);
-  leftWrap.appendChild(statusEl);
-
-  left.appendChild(avatar);
-  left.appendChild(leftWrap);
-
-  // right: profile/settings icon
-  const right = document.createElement('div');
-  right.id = 'topBarRight';
-
-  const settingsBtn = document.createElement('button');
-  settingsBtn.title = 'Настройки профиля';
-  settingsBtn.id = 'settings-btn';
-  settingsBtn.textContent = '⚙️';
-  settingsBtn.addEventListener('click', () => { alert('Настройки профиля.'); });
-
-  right.appendChild(settingsBtn);
-
-  top.appendChild(left);
-  top.appendChild(right);
-
-  // вставляем в body в начало
-  document.body.insertBefore(top, document.body.firstChild);
-  return top;
-}
-
-// Устанавливает текст и аватар в верхней полосе
+// устанавливает текст и аватар в верхней полосе
 export function ensureTopBar(displayName) {
   const top = createTopBarIfMissing();
   const nameEl = document.getElementById('topBarName');
@@ -501,7 +425,7 @@ export async function loadAndRenderUsers() {
   }
 }
 
-// Chat UI
+// создание overlay чата
 function createChatOverlay() {
   if (document.getElementById('chatOverlay')) return;
 
@@ -587,11 +511,12 @@ function createChatOverlay() {
   document.body.appendChild(overlay);
 }
 
+// открыть чат пользователя
 export function openChatForUser({ userKey, displayName }) {
-  currentOpenChatUserKey = String(userKey || '').toLowerCase();
+  state.currentOpenChatUserKey = String(userKey || '').toLowerCase();
   createChatOverlay();
   const normalized = (userKey || '').toString().toLowerCase();
-  currentChat = { userKey: normalized, displayName: displayName || userKey, messages: [] };
+  state.currentChat = { userKey: normalized, displayName: displayName || userKey, messages: [] };
 
   // Пометим все сообщения этого чата как прочитанные (и обновим бейдж)
   try {
@@ -602,19 +527,19 @@ export function openChatForUser({ userKey, displayName }) {
   } catch (e) { }
 
   document.getElementById('chatOverlay').style.display = 'flex';
-  document.getElementById('chatTitle').textContent = currentChat.displayName;
+  document.getElementById('chatTitle').textContent = state.currentChat.displayName;
 
   // обновим статусную точку
-  updateChatStatusDot(currentChat.userKey);
+  updateChatStatusDot(state.currentChat.userKey);
 
   renderMessages();
 
-  // Асинхронно: загрузим историю из IndexedDB и подставим в currentChat.messages
+  // Асинхронно: загрузим историю из IndexedDB и подставим в state.currentChat.messages
   (async () => {
     try {
       console.log('[chat] loading history for', normalized);
       const rows = await getMessagesWith(normalized); // отсортировано по ts
-      currentChat.messages = []; // заменим текущий буфер на содержимое IDB
+      state.currentChat.messages = []; // заменим текущий буфер на содержимое IDB
 
       // сгруппируем записи по key = `${ts}|${from}|${to}`
       const groups = new Map();
@@ -692,7 +617,7 @@ export function openChatForUser({ userKey, displayName }) {
 
         const outgoing = String(preferred.from || '').toLowerCase() === myKey;
         const deliveryFlag = preferred && preferred.meta && preferred.meta.delivery ? preferred.meta.delivery : undefined;
-        currentChat.messages.push({
+        state.currentChat.messages.push({
           outgoing: !!outgoing,
           text: textForUI,
           ts: preferred.ts || Date.now(),
@@ -715,69 +640,25 @@ export function openChatForUser({ userKey, displayName }) {
   })();
 }
 
+// закрыть чат
 function closeChat() {
   const overlay = document.getElementById('chatOverlay');
   if (overlay) overlay.style.display = 'none';
-  currentChat = null;
+  state.currentChat = null;
+  state.currentOpenChatUserKey = null;
 }
 
-function isSameDay(tsA, tsB) {
-  if (!tsA || !tsB) return false;
-  const a = new Date(Number(tsA));
-  const b = new Date(Number(tsB));
-  return a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate();
-}
-
-function isYesterday(ts) {
-  const d = new Date(Number(ts));
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  return d.getFullYear() === yesterday.getFullYear() &&
-    d.getMonth() === yesterday.getMonth() &&
-    d.getDate() === yesterday.getDate();
-}
-
-// Возвращает строку типа "12:07"
-function formatTimeOnly(ts) {
-  const d = new Date(Number(ts));
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return hh + ':' + mm;
-}
-
-// Возвращает заголовок даты как в телеграме: "Сегодня", "Вчера", или "1 нояб. 2025"
-function formatDateHeader(ts) {
-  if (!ts) return '';
-  if (isSameDay(ts, Date.now())) return 'Сегодня';
-  if (isYesterday(ts)) return 'Вчера';
-  const d = new Date(Number(ts));
-
-  // компактный формат: "01 нояб. 2025" (локаль берём из браузера)
-  try {
-    const locale = navigator.language || 'ru-RU';
-    // получаем день и короткое название месяца
-    const day = d.getDate();
-    const month = d.toLocaleString(locale, { month: 'short' });
-    const year = d.getFullYear();
-    return `${day} ${month} ${year}`;
-  } catch (e) {
-    return d.toLocaleDateString();
-  }
-}
-
-
+// рендер сообщений
 function renderMessages() {
   const out = document.getElementById('chatMessages');
   if (!out) return;
   // очищаем
   while (out.firstChild) out.removeChild(out.firstChild);
-  if (!currentChat || !Array.isArray(currentChat.messages)) return;
+  if (!state.currentChat || !Array.isArray(state.currentChat.messages)) return;
 
   let lastTs = null;
 
-  currentChat.messages.forEach(m => {
+  state.currentChat.messages.forEach(m => {
     const ts = (m.meta && m.meta.origTs) || m.ts || m.meta.localTs || Date.now();
 
     // вставляем разделитель даты если дата изменилась
@@ -837,21 +718,22 @@ function renderMessages() {
   out.scrollTop = out.scrollHeight;
 }
 
+// отправка сообщения
 async function sendChatMessage() {
   const inp = document.getElementById('chatInput');
-  if (!inp || !currentChat) return;
+  if (!inp || !state.currentChat) return;
   const text = (inp.value || '').trim();
   if (!text) return;
   if (text.length > 2000) { alert('Сообщение слишком длинное'); return; }
 
-  if (!presenceClient) {
-    console.warn('presenceClient not set; cannot send message');
-    showInAppToast('Ошибка: Отправка невозможна: не подключён presenceClient');
+  if (!state.presenceClient) {
+    console.warn('state.presenceClient not set; cannot send message');
+    showInAppToast('Ошибка: Отправка невозможна: не подключён state.presenceClient');
     return;
   }
 
   try {
-    const recipient = currentChat.userKey;
+    const recipient = state.currentChat.userKey;
     // используем userKey (нормализованный) как "me"
     const me = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
 
@@ -899,19 +781,19 @@ async function sendChatMessage() {
     }
 
     // отрисовываем plaintext локально (пользователь должен увидеть своё сообщение сразу)
-    currentChat.messages.push({ outgoing: true, text, ts, delivery: 'pending' });
+    state.currentChat.messages.push({ outgoing: true, text, ts, delivery: 'pending' });
     renderMessages();
     inp.value = '';
 
     let sent = false;
 
-    // отправляем через presenceClient (payload содержит зашифрованный для получателя текст)
+    // отправляем через state.presenceClient (payload содержит зашифрованный для получателя текст)
     try {
       const payload = { type: 'chat_message', encrypted: true, text: cipherForRecipient, ts };
-      sent = presenceClient.sendSignal(recipient, payload);
-      console.log('[send] presenceClient.sendSignal returned', sent, 'recipient=', recipient);
+      sent = state.presenceClient.sendSignal(recipient, payload);
+      console.log('[send] state.presenceClient.sendSignal returned', sent, 'recipient=', recipient);
     } catch (e) {
-      console.error('[send] presenceClient.sendSignal threw', e && e.stack ? e.stack : e);
+      console.error('[send] state.presenceClient.sendSignal threw', e && e.stack ? e.stack : e);
     }
 
 
@@ -943,9 +825,9 @@ export async function handleIncomingMessage(fromUserKey, payload) {
       const ts = payload.ts;
       const status = payload.status; // ожидаем 'delivered'|'read'|'failed'
 
-      if (currentChat && currentChat.userKey === from) {
-        for (let i = currentChat.messages.length - 1; i >= 0; i--) {
-          const m = currentChat.messages[i];
+      if (state.currentChat && state.currentChat.userKey === from) {
+        for (let i = state.currentChat.messages.length - 1; i >= 0; i--) {
+          const m = state.currentChat.messages[i];
           if (m.outgoing && Number(m.ts) === Number(ts)) {
             if (status === 'read') m.delivery = 'read';
             else if (status === 'delivered') m.delivery = 'delivered';
@@ -969,7 +851,7 @@ export async function handleIncomingMessage(fromUserKey, payload) {
     if (!payload || payload.type !== 'chat_message') return false;
 
     const me = (localStorage.getItem('pwaUserName') || '').trim();
-    const shouldMarkRead = !!(currentChat && currentChat.userKey === from);
+    const shouldMarkRead = !!(state.currentChat && state.currentChat.userKey === from);
 
     // сохраняем и дождёмся записи
     try {
@@ -987,31 +869,31 @@ export async function handleIncomingMessage(fromUserKey, payload) {
     }
 
     // Если чат открыт — отрисуем (и отправим read receipt)
-    if (currentChat && currentChat.userKey === from) {
+    if (state.currentChat && state.currentChat.userKey === from) {
       (async () => {
         try {
           const messageTs = payload.ts || Date.now();
           if (payload.encrypted) {
             try {
               const plain = await decryptOwn(payload.text);
-              currentChat.messages.push({ outgoing: false, text: plain, ts: messageTs });
+              state.currentChat.messages.push({ outgoing: false, text: plain, ts: messageTs });
             } catch (e) {
-              currentChat.messages.push({ outgoing: false, text: '[Зашифровано]', ts: messageTs });
+              state.currentChat.messages.push({ outgoing: false, text: '[Зашифровано]', ts: messageTs });
             }
           } else {
-            currentChat.messages.push({ outgoing: false, text: String(payload.text || ''), ts: messageTs });
+            state.currentChat.messages.push({ outgoing: false, text: String(payload.text || ''), ts: messageTs });
           }
 
           renderMessages();
 
           // Отправляем read receipt немедленно — т.к. чат открыт и сообщение показано пользователю.
           try {
-            if (presenceClient && typeof presenceClient.sendSignal === 'function') {
+            if (state.presenceClient && typeof state.presenceClient.sendSignal === 'function') {
               const receiptPayload = { type: 'chat_receipt', ts: messageTs, status: 'read' };
-              const ok = presenceClient.sendSignal(from, receiptPayload);
+              const ok = state.presenceClient.sendSignal(from, receiptPayload);
               console.log('[incoming][receipt] sent read for open chat', { to: from, ts: messageTs, ok });
             } else {
-              console.warn('[incoming][receipt] no presenceClient to send read for open chat', { to: from, ts: messageTs });
+              console.warn('[incoming][receipt] no state.presenceClient to send read for open chat', { to: from, ts: messageTs });
             }
           } catch (e) {
             console.warn('[incoming][receipt] failed sending read for open chat', e && e.message ? e.message : e);
@@ -1035,11 +917,11 @@ export async function handleIncomingMessage(fromUserKey, payload) {
     }
 
     try {
-      if (presenceClient && typeof presenceClient.sendSignal === 'function') {
+      if (state.presenceClient && typeof state.presenceClient.sendSignal === 'function') {
         const receiptStatus = shouldMarkRead ? 'read' : 'delivered'; // если чат открыт — read, иначе delivered
         try {
           const receiptPayload = { type: 'chat_receipt', ts: payload.ts, status: receiptStatus };
-          presenceClient.sendSignal(from, receiptPayload);
+          state.presenceClient.sendSignal(from, receiptPayload);
           console.log('[receipt] sent', receiptPayload, 'to', from);
         } catch (e) {
           console.warn('[receipt] failed to send receipt', e && e.message ? e.message : e);
@@ -1078,11 +960,7 @@ export function showResultBlock(resultBlock, lines, hideAfterMs) {
   }
 }
 
-
-// Инициализатор обработчика postMessage от service-worker.
-// После вызова будет централизованно обрабатываться:
-//  - сообщения типа { type: 'open_chat', from } -> диспатчим событие open_chat (и открытие чата)
-// Вызывать один раз при старте приложения (например после регистрации SW в main.js).
+// Инициализатор обработчика postMessage от service-worker
 export function initSWMessageHandler() {
   if (!('serviceWorker' in navigator)) return;
 
@@ -1112,17 +990,7 @@ export function initSWMessageHandler() {
   }, { passive: true });
 }
 
-
-// Обработать push-перенесённый из service-worker.
-// payload — то, что SW прислал в msg.data (как ты формируешь в SW).
-
-// Ожидаемый формат от сервера (как вариант):
-//  { title, body, data: { from, payload: { text, encrypted } } }
-
-// Функция:
-//  - вычисляет from
-//  - формирует snippet (для бейджа) — если зашифровано -> '[Зашифровано]' иначе текст/тело
-//  - если чат открыт с from — ничего не показывает (чтобы не дублировать у клиента)
+// Обработать push-перенесённый из service-worker
 async function handleSWPush(payload) {
   try {
     // Попробуем извлечь поле from
@@ -1182,7 +1050,7 @@ async function handleSWPush(payload) {
       console.warn('[SW->client] showInAppToast failed', e);
     }
 
-    // Если у нас есть presenceClient и в push-полезных данных есть оригинальный ts — подтвердим доставку
+    // Если у нас есть state.presenceClient и в push-полезных данных есть оригинальный ts — подтвердим доставку
     try {
       const inner = (payload && payload.data && payload.data.payload) || null;
       const origTs = inner && (inner.ts || inner.messageTs || inner.t) ? (inner.ts || inner.messageTs || inner.t) : null;
@@ -1190,11 +1058,11 @@ async function handleSWPush(payload) {
       // Если чат открыт и видим — считаем прочитаным
       const shouldMarkRead = isChatOpenWith(normFrom);
 
-      if (presenceClient && typeof presenceClient.sendSignal === 'function' && origTs) {
+      if (state.presenceClient && typeof state.presenceClient.sendSignal === 'function' && origTs) {
         const receiptStatus = shouldMarkRead ? 'read' : 'delivered';
         try {
           const receiptPayload = { type: 'chat_receipt', ts: origTs, status: receiptStatus };
-          presenceClient.sendSignal(normFrom, receiptPayload);
+          state.presenceClient.sendSignal(normFrom, receiptPayload);
           console.log('[SW->client receipt] sent', receiptPayload, 'to', normFrom);
         } catch (e) {
           console.warn('[SW->client] failed to send receipt', e);
