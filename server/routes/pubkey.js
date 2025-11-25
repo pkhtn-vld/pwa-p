@@ -33,7 +33,12 @@ router.post('/upload-pubkey', async (req, res) => {
         sodiumPublicKeyBase64: publicKey
       });
     } else {
-      state.savedCredentials[userKey][0].sodiumPublicKeyBase64 = publicKey;
+      // если ключ ещё не установлен — сохраняем, иначе игнорируем повторную загрузку
+      if (!state.savedCredentials[userKey][0].sodiumPublicKeyBase64) {
+        state.savedCredentials[userKey][0].sodiumPublicKeyBase64 = publicKey;
+      } else {
+        console.log('[server] pubkey already exists for', userKey, '— ignoring reupload');
+      }
     }
 
     // сохранить на диск
