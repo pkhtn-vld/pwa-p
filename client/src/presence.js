@@ -1,6 +1,6 @@
 // --- активность пользователя
 
-import { updateOnlineList, setPresenceClient, handleIncomingMessage, showInAppToast } from "./userList.js";
+import { updateOnlineList, handleIncomingMessage, showInAppToast } from "./userList.js";
 import { state, setPresenceClient } from './state.js';
 
 // создаёт клиента, подключает его и синхронизирует с видимостью страницы
