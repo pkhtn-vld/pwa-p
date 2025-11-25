@@ -363,7 +363,6 @@ async function acceptCall(from, callId) {
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' }
-        // при необходимости добавь TURN здесь
       ]
     });
 
@@ -379,7 +378,6 @@ async function acceptCall(from, callId) {
     } catch (e) {
       localToast('Нужен доступ к микрофону');
       console.warn('[call][accept] getUserMedia failed', e);
-      // уведомим remote
       try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'media_denied' }); } catch (e) {}
       cleanupCall(callId);
       return;
@@ -389,7 +387,7 @@ async function acceptCall(from, callId) {
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
     console.log('[call][accept] added local tracks to pc; pc.getSenders():', pc.getSenders());
 
-    // local analyser
+    // local analyser (опционально, если у тебя это есть)
     try {
       const ac = new (window.AudioContext || window.webkitAudioContext)();
       const src = ac.createMediaStreamSource(localStream);
@@ -490,8 +488,27 @@ async function acceptCall(from, callId) {
 
     console.log('[call][accept] setting remoteDescription (offer) for', callId);
     await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: info.offerSdp }));
-    console.log('[call][accept] remoteDescription set, creating answer', callId);
 
+    // --- APPLY any pending candidates that arrived BEFORE pc was created ---
+    try {
+      if (info.pendingCandidates && info.pendingCandidates.length) {
+        console.log('[call][accept] applying', info.pendingCandidates.length, 'pending candidates for', callId);
+        for (const cand of info.pendingCandidates) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(cand));
+            console.log('[call][accept] applied pending candidate', callId, cand);
+          } catch (e) {
+            console.warn('[call][accept] failed applying pending candidate', e, cand);
+          }
+        }
+        // clear pending
+        info.pendingCandidates = [];
+      }
+    } catch (e) {
+      console.warn('[call][accept] pendingCandidates apply step failed', e);
+    }
+
+    console.log('[call][accept] remoteDescription set, creating answer', callId);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     console.log('[call][accept] localDescription (answer) set, local SDP length:', (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0);
@@ -524,55 +541,63 @@ async function acceptCall(from, callId) {
 // Основной обработчик входящих call-сигналов
 export async function handleCallSignal(from, payload) {
   try {
+    console.log('[call][handle] incoming signal from=', from, 'payload=', payload);
     if (!payload || !payload.type) return;
     const type = payload.type;
     const callId = payload.callId;
-    if (!callId) return;
+    if (!callId) {
+      console.warn('[call][handle] no callId in payload', payload);
+      return;
+    }
 
     if (type === 'call_offer') {
-      // если уже есть запись — перезапишем offer
       const existing = activeCalls.get(callId) || {};
       existing.offerSdp = payload.sdp;
-      // пометим кто звонит
       existing.from = from;
-      // создаём incoming UI
       const uiId = showIncomingUI(from, callId);
       existing.uiIds = existing.uiIds || {};
       existing.uiIds.incoming = uiId;
+      // ensure pendingCandidates array exists (in case candidates arrive before accept)
+      existing.pendingCandidates = existing.pendingCandidates || [];
       activeCalls.set(callId, existing);
+      console.log('[call][handle] stored offer for', callId);
       return;
     }
 
     if (type === 'call_answer') {
-      // caller получает answer -> установим remoteDescription
       const info = activeCalls.get(callId);
       if (!info || !info.pc) {
-        console.warn('call_answer for unknown call', callId);
+        console.warn('[call][handle] call_answer for unknown call', callId);
         return;
       }
       try {
         await info.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }));
-        // remove outgoing UI
         if (info.uiIds && info.uiIds.outgoing) removeUI(info.uiIds.outgoing);
         localToast('Звонок подключён');
-        // clear timeout
         if (info.timeoutId) { clearTimeout(info.timeoutId); info.timeoutId = null; activeCalls.set(callId, info); }
+        console.log('[call][handle] setRemoteDescription(answer) OK for', callId);
       } catch (e) {
-        console.warn('setRemoteDescription(answer) failed', e);
+        console.warn('[call][handle] setRemoteDescription(answer) failed', e);
       }
       return;
     }
 
     if (type === 'call_candidate') {
-      const info = activeCalls.get(callId);
-      if (!info || !info.pc) {
-        console.warn('candidate for unknown call', callId);
+      // buffer candidate if pc not created yet
+      const info = activeCalls.get(callId) || {};
+      if (!info.pc) {
+        // store candidate for later applying
+        info.pendingCandidates = info.pendingCandidates || [];
+        info.pendingCandidates.push(payload.candidate);
+        activeCalls.set(callId, info);
+        console.log('[call][handle] saved pending candidate for', callId, payload.candidate);
         return;
       }
       try {
-        if (payload.candidate) await info.pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        console.log('[call][handle] adding candidate for', callId, payload.candidate);
+        await info.pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
       } catch (e) {
-        console.warn('addIceCandidate failed', e);
+        console.warn('[call][handle] addIceCandidate failed', e);
       }
       return;
     }
@@ -580,6 +605,7 @@ export async function handleCallSignal(from, payload) {
     if (type === 'call_end') {
       cleanupCall(callId);
       localToast(`Звонок завершён: ${payload.reason || ''}`);
+      console.log('[call][handle] call_end for', callId, 'reason=', payload.reason);
       return;
     }
 
