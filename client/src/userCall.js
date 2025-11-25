@@ -111,13 +111,49 @@ function cleanupCall(callId) {
   const info = activeCalls.get(callId);
   if (!info) return;
   try {
-    if (info.pc) try { info.pc.close(); } catch (e) {}
-    if (info.localStream) try { info.localStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    // остановка/закрытие AudioContext и интервала анализа (если есть)
+    try {
+      if (info.levelIntervalId) {
+        clearInterval(info.levelIntervalId);
+        info.levelIntervalId = null;
+      }
+      if (info.localAudioContext) {
+        try { info.localAudioContext.close(); } catch (e) { /* ignore */ }
+        info.localAudioContext = null;
+      }
+      if (info.remoteAudioContext) {
+        try { info.remoteAudioContext.close(); } catch (e) { /* ignore */ }
+        info.remoteAudioContext = null;
+      }
+    } catch (e) { console.warn('[call][cleanup] audio analyser cleanup failed', e); }
+
+    // удалить audio элемент (remote)
+    try {
+      const audioEl = document.getElementById('call-audio-' + callId);
+      if (audioEl) {
+        try { audioEl.srcObject = null; } catch (e) {}
+        try { audioEl.remove(); } catch (e) {}
+      }
+    } catch (e) { /* ignore */ }
+
+    // закрыть pc
+    if (info.pc) {
+      try { info.pc.close(); } catch (e) { /* ignore */ }
+      info.pc = null;
+    }
+    // остановить локальные треки
+    if (info.localStream) {
+      try { info.localStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} }); } catch (e) {}
+      info.localStream = null;
+    }
+    // удалить UI
     if (info.uiIds) {
       if (info.uiIds.incoming) removeUI(info.uiIds.incoming);
       if (info.uiIds.outgoing) removeUI(info.uiIds.outgoing);
     }
-  } catch (e) {}
+  } catch (e) {
+    console.warn('[call][cleanup] cleanupCall threw', e);
+  }
   activeCalls.delete(callId);
 }
 
@@ -132,10 +168,11 @@ async function acquireMic() {
 
 // Инициатор звонка
 export async function initiateCallTo(userKey) {
+  console.log('[call][init] enter initiateCallTo userKey=', userKey);
   try {
-    if (!state.presenceClient) { localToast('Нет WS соединения'); return; }
+    if (!state.presenceClient) { console.warn('[call][init] no state.presenceClient'); localToast('Нет WS соединения'); return; }
     const me = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
-    if (!me) { localToast('Неавторизован'); return; }
+    if (!me) { console.warn('[call][init] no local userName'); localToast('Неавторизован'); return; }
     const to = String(userKey).toLowerCase();
     const callId = makeId();
     const outgoingUI = showOutgoingUI(callId, to);
@@ -143,6 +180,7 @@ export async function initiateCallTo(userKey) {
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' }
+        // при необходимости добавь TURN здесь
       ]
     });
 
@@ -164,6 +202,46 @@ export async function initiateCallTo(userKey) {
 
     // добавляем локальные треки до создания offer
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    console.log('[call][init] added local tracks to pc; pc.getSenders():', pc.getSenders());
+
+    // --- создаём локальный AudioContext + analyser для мониторинга уровня микрофона ---
+    try {
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      const src = ac.createMediaStreamSource(localStream);
+      const analyser = ac.createAnalyser();
+      analyser.fftSize = 2048;
+      src.connect(analyser);
+      // сохраняем в activeCalls позже
+      // вычисление RMS каждые 300ms
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const levelIntervalId = setInterval(() => {
+        analyser.getByteTimeDomainData(data);
+        // compute RMS-ish
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = (data[i] - 128) / 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / data.length);
+        console.log('[call][init] local mic level', callId, rms.toFixed(4));
+      }, 300);
+      // attach to activeCalls info after created
+      // we'll attach these below
+      // store placeholder now
+      // (we'll set actual via activeCalls.set)
+      // analyser & interval will be stored in info
+      // but keep references here to assign later if needed
+      // no-op
+      // end analyser setup
+      // We'll attach ac, analyser, intervalId to info below
+      // (wrapped in try/catch)
+      // save temporaries:
+      var _localAudioContext = ac;
+      var _localAnalyser = analyser;
+      var _localLevelIntervalId = levelIntervalId;
+    } catch (e) {
+      console.warn('[call][init] failed to create local AudioContext/analyser', e);
+    }
 
     // ICE кандидаты — отправляем в JSON форме и логируем
     pc.onicecandidate = (ev) => {
@@ -178,7 +256,7 @@ export async function initiateCallTo(userKey) {
       }
     };
 
-    // ontrack — воспроизводим и явно play()
+    // ontrack — воспроизводим и создаём analyser для remote stream
     pc.ontrack = (ev) => {
       try {
         let audio = document.getElementById('call-audio-' + callId);
@@ -192,8 +270,38 @@ export async function initiateCallTo(userKey) {
         }
         audio.muted = false;
         audio.volume = 1.0;
-        audio.srcObject = (ev.streams && ev.streams[0]) || ev.stream || null;
-        console.log('[call][init] ontrack set srcObject', callId, audio.srcObject);
+        const remoteStream = (ev.streams && ev.streams[0]) || ev.stream || null;
+        audio.srcObject = remoteStream;
+        console.log('[call][init] ontrack set srcObject', callId, remoteStream);
+
+        // создаём analyser для remote потока
+        try {
+          const ac2 = new (window.AudioContext || window.webkitAudioContext)();
+          const src2 = ac2.createMediaStreamSource(remoteStream);
+          const analyser2 = ac2.createAnalyser();
+          analyser2.fftSize = 2048;
+          src2.connect(analyser2);
+          const data2 = new Uint8Array(analyser2.frequencyBinCount);
+          const remoteInterval = setInterval(() => {
+            analyser2.getByteTimeDomainData(data2);
+            let sum = 0;
+            for (let i = 0; i < data2.length; i++) {
+              const v = (data2[i] - 128) / 128;
+              sum += v * v;
+            }
+            const rms2 = Math.sqrt(sum / data2.length);
+            console.log('[call][init] remote audio level', callId, rms2.toFixed(4));
+          }, 300);
+          // привяжем к activeCalls запись (если уже есть)
+          const cur = activeCalls.get(callId) || {};
+          cur.remoteAudioContext = ac2;
+          cur.remoteAnalyser = analyser2;
+          cur.remoteLevelIntervalId = remoteInterval;
+          activeCalls.set(callId, cur);
+        } catch (e) {
+          console.warn('[call][init] failed to create remote analyser', e);
+        }
+
         audio.play().then(() => {
           console.log('[call][init] audio.play OK', callId);
         }).catch((err) => {
@@ -209,7 +317,17 @@ export async function initiateCallTo(userKey) {
     await pc.setLocalDescription(offer);
     console.log('[call][init] created offer, local SDP length:', (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0);
 
-    activeCalls.set(callId, { pc, localStream, role: 'caller', to, uiIds: { outgoing: outgoingUI } });
+    // assemble info object and attach analyser refs if created
+    const info = { pc, localStream, role: 'caller', to, uiIds: { outgoing: outgoingUI } };
+    try {
+      if (typeof _localAudioContext !== 'undefined') {
+        info.localAudioContext = _localAudioContext;
+        info.localAnalyser = _localAnalyser;
+        info.levelIntervalId = _localLevelIntervalId;
+      }
+    } catch (e) { /* ignore */ }
+
+    activeCalls.set(callId, info);
 
     // send offer via presenceClient (sdp string)
     try {
@@ -224,10 +342,11 @@ export async function initiateCallTo(userKey) {
       try { if (state.presenceClient) state.presenceClient.sendSignal(to, { type: 'call_end', callId, reason: 'timeout' }); } catch (e) {}
       cleanupCall(callId);
       localToast('Абонент не ответил');
+      console.log('[call][init] timeout cleanup for', callId);
     }, 30000);
-    const info = activeCalls.get(callId) || {};
-    info.timeoutId = toId;
-    activeCalls.set(callId, info);
+    const savedInfo = activeCalls.get(callId) || {};
+    savedInfo.timeoutId = toId;
+    activeCalls.set(callId, savedInfo);
 
   } catch (e) {
     console.error('initiateCallTo error', e);
@@ -236,7 +355,6 @@ export async function initiateCallTo(userKey) {
 }
 
 // Принятие входящего звонка (вызывается при клике "Принять")
-// --- Заменить существующую функцию acceptCall на эту версию ---
 async function acceptCall(from, callId) {
   try {
     const info = activeCalls.get(callId) || {};
@@ -267,8 +385,34 @@ async function acceptCall(from, callId) {
       return;
     }
 
-    // добавляем локальные треки до/после — безопасно добавить сейчас
+    // добавляем локальные треки
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    console.log('[call][accept] added local tracks to pc; pc.getSenders():', pc.getSenders());
+
+    // local analyser
+    try {
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      const src = ac.createMediaStreamSource(localStream);
+      const analyser = ac.createAnalyser();
+      analyser.fftSize = 2048;
+      src.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const levelIntervalId = setInterval(() => {
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = (data[i] - 128) / 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / data.length);
+        console.log('[call][accept] local mic level', callId, rms.toFixed(4));
+      }, 300);
+      info.localAudioContext = ac;
+      info.localAnalyser = analyser;
+      info.levelIntervalId = levelIntervalId;
+    } catch (e) {
+      console.warn('[call][accept] failed to create local analyser', e);
+    }
 
     // ICE кандидаты — отправляем в JSON форме и логируем
     pc.onicecandidate = (ev) => {
@@ -283,7 +427,7 @@ async function acceptCall(from, callId) {
       }
     };
 
-    // ontrack — воспроизводим и явно play()
+    // ontrack — воспроизводим и создаём analyser для remote stream
     pc.ontrack = (ev) => {
       try {
         let audio = document.getElementById('call-audio-' + callId);
@@ -297,10 +441,35 @@ async function acceptCall(from, callId) {
         }
         audio.muted = false;
         audio.volume = 1.0;
-        // ev.streams[0] наиболее надёжен; fallback ev.stream
-        audio.srcObject = (ev.streams && ev.streams[0]) || ev.stream || null;
-        console.log('[call][accept] ontrack set srcObject', callId, audio.srcObject);
-        // попытка play (обычно вызвана кликом "Принять" — политика автоплей должна разрешить)
+        const remoteStream = (ev.streams && ev.streams[0]) || ev.stream || null;
+        audio.srcObject = remoteStream;
+        console.log('[call][accept] ontrack set srcObject', callId, remoteStream);
+
+        // remote analyser
+        try {
+          const ac2 = new (window.AudioContext || window.webkitAudioContext)();
+          const src2 = ac2.createMediaStreamSource(remoteStream);
+          const analyser2 = ac2.createAnalyser();
+          analyser2.fftSize = 2048;
+          src2.connect(analyser2);
+          const data2 = new Uint8Array(analyser2.frequencyBinCount);
+          const remoteInterval = setInterval(() => {
+            analyser2.getByteTimeDomainData(data2);
+            let sum = 0;
+            for (let i = 0; i < data2.length; i++) {
+              const v = (data2[i] - 128) / 128;
+              sum += v * v;
+            }
+            const rms2 = Math.sqrt(sum / data2.length);
+            console.log('[call][accept] remote audio level', callId, rms2.toFixed(4));
+          }, 300);
+          info.remoteAudioContext = ac2;
+          info.remoteAnalyser = analyser2;
+          info.remoteLevelIntervalId = remoteInterval;
+        } catch (e) {
+          console.warn('[call][accept] failed to create remote analyser', e);
+        }
+
         audio.play().then(() => {
           console.log('[call][accept] audio.play OK', callId);
         }).catch((err) => {
@@ -313,7 +482,6 @@ async function acceptCall(from, callId) {
 
     // set remote (offer) if present
     if (!info.offerSdp) {
-      // если offer ещё не пришёл/записан — отклоняем с логом
       console.warn('[call][accept] no offerSdp for callId', callId, 'from', from);
       try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'no_offer' }); } catch (e) {}
       cleanupCall(callId);
@@ -337,7 +505,10 @@ async function acceptCall(from, callId) {
     }
 
     // update state
-    activeCalls.set(callId, { ...info, pc, localStream, role: 'callee' });
+    info.pc = pc;
+    info.localStream = localStream;
+    info.role = 'callee';
+    activeCalls.set(callId, info);
 
     // remove incoming UI
     if (info.uiIds && info.uiIds.incoming) removeUI(info.uiIds.incoming);
