@@ -7,8 +7,13 @@ export function updateUIOnLoad() {
   const mode = document.getElementById('mode');
   const network = document.getElementById('network');
 
-  mode?.textContent = isStandalone() ? 'PWA режим' : 'Браузер';
-  network?.textContent = isOnline() ? 'Онлайн' : 'Офлайн';
+  if (mode) {
+    mode.textContent = isStandalone() ? 'PWA режим' : 'Браузер';
+  }
+
+  if (network) {
+    network.textContent = isOnline() ? 'Онлайн' : 'Офлайн';
+  }
 
   // TODO: прелоадер добавить
   const savedName = localStorage.getItem('pwaUserName');
