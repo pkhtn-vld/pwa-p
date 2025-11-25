@@ -3,9 +3,9 @@ import { openDB } from 'idb';
 
 const DB_NAME = 'pwa-chat';
 const DB_VERSION = 1;
-const STORE_KEYS = 'keys';       // хранит нашу пару ключей, запись с id='sodium'
-const STORE_PUBKEYS = 'pubkeys';// кеш публичных ключей других пользователей { userKey, publicKeyBase64 }
-const STORE_MESSAGES = 'messages'; // история
+const STORE_KEYS = 'keys';          // хранит нашу пару ключей, запись с id='sodium'
+const STORE_PUBKEYS = 'pubkeys';    // кеш публичных ключей других пользователей { userKey, publicKeyBase64 }
+const STORE_MESSAGES = 'messages';  // история
 
 async function open() {
   return openDB(DB_NAME, DB_VERSION, {
@@ -79,7 +79,6 @@ export async function ensureKeypair(userKey) {
   return rec;
 }
 
-// getLocalKeypair()
 // возвращает запись с IDB (или null)
 export async function getLocalKeypair() {
   const db = await open();
@@ -87,7 +86,7 @@ export async function getLocalKeypair() {
 }
 
 // кеш публичных ключей других пользователей
-// cachePubkey(userKey, publicKeyBase64) - сохранить в локальный кеш
+// сохранить в локальный кеш
 export async function cachePubkey(userKey, publicKeyBase64) {
   const db = await open();
   const key = String(userKey).toLowerCase();
@@ -95,14 +94,14 @@ export async function cachePubkey(userKey, publicKeyBase64) {
   console.log('[sodium] cached pubkey for', key, publicKeyBase64 ? publicKeyBase64.slice(0, 12) + '...' : null);
 }
 
-// getCachedPubkey(userKey) - вернуть из кеша (или null)
+// вернуть из кеша (или null)
 export async function getCachedPubkey(userKey) {
   const db = await open();
   const rec = await db.get(STORE_PUBKEYS, String(userKey).toLowerCase());
   return rec && rec.publicKeyBase64 ? rec.publicKeyBase64 : null;
 }
 
-// fetchAndCachePubkey(userKey) - GET /pubkey?user=... -> кешировать и вернуть (или null)
+// GET /pubkey?user=... -> кешировать и вернуть (или null)
 export async function fetchAndCachePubkey(userKey) {
   try {
     const q = encodeURIComponent(String(userKey).toLowerCase());
@@ -123,7 +122,7 @@ export async function fetchAndCachePubkey(userKey) {
   return null;
 }
 
-// getPubkey(userKey) - сначала из кеша, иначе с сервера
+// сначала из кеша, иначе с сервера
 export async function getPubkey(userKey) {
   if (!userKey) return null;
   const cached = await getCachedPubkey(userKey);
@@ -132,7 +131,7 @@ export async function getPubkey(userKey) {
 }
 
 // шифрование / расшифровка
-//encryptForPublicBase64(recipientPublicBase64, text) - шифрует строку и возвращает base64 cipher
+// шифрует строку и возвращает base64 cipher
 export async function encryptForPublicBase64(recipientPublicBase64, text) {
   await readySodium();
   if (!recipientPublicBase64) throw new Error('recipientPublicBase64 required');
@@ -143,7 +142,7 @@ export async function encryptForPublicBase64(recipientPublicBase64, text) {
   return cipherB64;
 }
 
-// decryptOwn(ciphertextBase64) - расшифровать сообщение, зашифрованное crypto_box_seal,
+// расшифровать сообщение, зашифрованное crypto_box_seal,
 // используя локальную пару (public+private). Возвращает plaintext string либо бросает ошибку.
 export async function decryptOwn(ciphertextBase64) {
   await readySodium();
@@ -207,7 +206,6 @@ export async function updateMessageDeliveryStatus(recipient, ts, status) {
   }
 }
 
-// saveMessageLocal(msg)
 // msg shape example:
 // { from, to, text, encrypted: true|false, ts: number, meta: {...}, read: true|false }
 export async function saveMessageLocal(msg) {
@@ -234,7 +232,7 @@ export async function saveMessageLocal(msg) {
   }
 }
 
-// getMessagesWith(userKey) - вернуть все сообщения с/к userKey, отсортированные по ts
+// вернуть все сообщения с/к userKey, отсортированные по ts
 export async function getMessagesWith(userKey) {
   const db = await open();
   const arr = await db.getAll(STORE_MESSAGES);
@@ -243,17 +241,3 @@ export async function getMessagesWith(userKey) {
     .sort((a, b) => (a.ts || 0) - (b.ts || 0));
   return res;
 }
-
-// экспорт набора утилит
-export default {
-  ensureKeypair,
-  getLocalKeypair,
-  getPubkey,
-  encryptForPublicBase64,
-  decryptOwn,
-  saveMessageLocal,
-  getMessagesWith,
-  cachePubkey,
-  getCachedPubkey,
-  updateMessageDeliveryStatus
-};

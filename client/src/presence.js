@@ -1,4 +1,44 @@
-export function createPresenceClient(opts = {}) {
+// --- активность пользователя
+
+import { updateOnlineList, setPresenceClient, handleIncomingMessage, showInAppToast } from "./userList.js";
+
+let pc = null;
+
+// создаёт клиента, подключает его и синхронизирует с видимостью страницы
+export async function ensurePresenceClient() {
+  if (pc) return pc;
+  pc = createPresenceClient();
+  // Попытка подключиться немедленно, если уже есть сессия
+  await pc.connectWhenAuth();
+
+  try {
+    // отправим текущее состояние (будет буферизовано, если ws ещё не открыт)
+    sendVisibilityState(pc, document.visibilityState === 'visible');
+
+    // слушаем изменения видимости
+    document.addEventListener('visibilitychange', () => {
+      const isVisible = document.visibilityState === 'visible';
+      sendVisibilityState(pc, isVisible);
+    }, { passive: true });
+
+    // pagehide — попытка отправить перед закрытием/сворачиванием
+    window.addEventListener('pagehide', () => {
+      try { sendVisibilityState(pc, false); } catch (e) { }
+    });
+
+    // опционально: beforeunload (меньше шансов успеха, но лучше попытаться)
+    window.addEventListener('beforeunload', () => {
+      try { sendVisibilityState(pc, false); } catch (e) { }
+    });
+  } catch (e) { console.warn('visibility hook failed', e); }
+
+  setPresenceClient(pc);
+  attachPresenceListeners(pc);
+  return pc;
+}
+
+// создаёт WebSocket‑клиент для отслеживания онлайн‑статуса и сигналов
+function createPresenceClient(opts = {}) {
   const baseUrl = opts.url || `${(location.protocol === 'https:' ? 'wss' : 'ws')}://${location.host}/ws`;
   let ws = null;
   let connected = false;
@@ -7,6 +47,7 @@ export function createPresenceClient(opts = {}) {
   let pendingQueue = [];       // очередь сообщений, пока не открыт WS
   let reconnecting = false;
 
+  // запускает таймер, который каждые 20 секунд шлёт heartbeat на сервер
   function heartbeatTimer() {
     if (hbInterval) clearInterval(hbInterval);
     hbInterval = setInterval(() => {
@@ -16,6 +57,7 @@ export function createPresenceClient(opts = {}) {
     }, 20000);
   }
 
+  // отправляет накопленные сообщения из очереди, когда соединение открыто
   function flushQueue() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     while (pendingQueue.length > 0) {
@@ -24,6 +66,7 @@ export function createPresenceClient(opts = {}) {
     }
   }
 
+  // устанавливает WebSocket‑соединение и настраивает обработчики событий
   function connect() {
     // если уже подключаемся/подключены — ничего не делаем
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
@@ -37,9 +80,9 @@ export function createPresenceClient(opts = {}) {
     ws.addEventListener('open', () => {
       connected = true;
       reconnecting = false;
-      listeners.open.forEach(fn => { try { fn(); } catch (e) {} });
+      listeners.open.forEach(fn => { try { fn(); } catch (e) { } });
       // запросим список онлайн
-      try { ws.send(JSON.stringify({ type: 'list' })); } catch (e) {}
+      try { ws.send(JSON.stringify({ type: 'list' })); } catch (e) { }
       heartbeatTimer();
       flushQueue();
     });
@@ -48,11 +91,11 @@ export function createPresenceClient(opts = {}) {
       let msg;
       try { msg = JSON.parse(e.data); } catch (err) { return; }
       if (msg && msg.type === 'presence') {
-        listeners.presence.forEach(fn => { try { fn(msg.online || []); } catch (e) {} });
+        listeners.presence.forEach(fn => { try { fn(msg.online || []); } catch (e) { } });
       } else if (msg && msg.type === 'signal') {
-        listeners.signal.forEach(fn => { try { fn(msg.from, msg.payload); } catch (e) {} });
+        listeners.signal.forEach(fn => { try { fn(msg.from, msg.payload); } catch (e) { } });
       } else if (msg && msg.type === 'list') {
-        listeners.presence.forEach(fn => { try { fn(msg.online || []); } catch (e) {} });
+        listeners.presence.forEach(fn => { try { fn(msg.online || []); } catch (e) { } });
       }
     });
 
@@ -69,12 +112,12 @@ export function createPresenceClient(opts = {}) {
     });
 
     ws.addEventListener('error', () => {
-      try { ws.close(); } catch (e) {}
+      try { ws.close(); } catch (e) { }
       if (hbInterval) { clearInterval(hbInterval); hbInterval = null; }
     });
   }
 
-  // проверяет /session — если аутентифицировано, подключается.
+  // проверяет /session — если аутентифицировано, подключается
   async function connectWhenAuth() {
     try {
       const r = await fetch('/session', { credentials: 'include' });
@@ -95,6 +138,7 @@ export function createPresenceClient(opts = {}) {
     return () => { listeners[evt] = listeners[evt].filter(x => x !== fn); };
   }
 
+  // отправляет произвольное сообщение или кладёт его в очередь, если соединение не готово
   function sendRaw(msg) {
     try {
       if (!msg || typeof msg !== 'object') return false;
@@ -122,6 +166,7 @@ export function createPresenceClient(opts = {}) {
     }
   }
 
+  // сообщает серверу, видна ли вкладка пользователя
   function sendVisibility(visible) {
     return sendRaw({ type: 'visibility', visible: !!visible });
   }
@@ -179,14 +224,14 @@ export function createPresenceClient(opts = {}) {
 
       // если соединение открыто — отправим сразу
       if (ws && ws.readyState === WebSocket.OPEN) {
-        try { 
-          ws.send(JSON.stringify(msg)); 
-          return true; 
+        try {
+          ws.send(JSON.stringify(msg));
+          return true;
         }
-        catch (e) { 
+        catch (e) {
           console.warn('sendSignal WS send failed, queueing', e);
-          pendingQueue.push(msg); 
-          return false; 
+          pendingQueue.push(msg);
+          return false;
         }
       }
 
@@ -213,4 +258,59 @@ export function createPresenceClient(opts = {}) {
     isConnected: () => connected,
     raw: () => ws
   };
+}
+
+// универсально отправляет состояние видимости
+function sendVisibilityState(pc, visible) {
+  try {
+    if (!pc) return;
+    if (typeof pc.sendVisibility === 'function') {
+      pc.sendVisibility(visible);
+      return;
+    }
+    // fallback: если нет sendVisibility — попробуем sendRaw or raw()
+    if (typeof pc.sendRaw === 'function') {
+      pc.sendRaw({ type: 'visibility', visible: !!visible });
+      return;
+    }
+    const ws = (pc.raw && pc.raw()) || null;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'visibility', visible: !!visible }));
+    }
+  } catch (e) { console.warn('sendVisibilityState failed', e); }
+}
+
+// навешивает обработчики на события presence и signal, обновляет список онлайн и сообщения
+function attachPresenceListeners(p) {
+  if (!p) return;
+  p.on('presence', (online) => {
+    console.log('online list', online);
+    updateOnlineList(online);
+  });
+  p.on('signal', async (from, payload) => {
+    try {
+      console.log('[presence.signal] from=', from, 'payload=', payload);
+
+      // Обрабатываем и chat_message, и chat_receipt через один обработчик,
+      // который делегирует детали в handleIncomingMessage.
+      if (payload && (payload.type === 'chat_message' || payload.type === 'chat_receipt')) {
+        try {
+          const handled = await handleIncomingMessage(from, payload);
+          // Показываем in-app toast только если это chat_message и не отрисовано в открытом чате
+          if (!handled && payload.type === 'chat_message') {
+            showInAppToast(`Новое сообщение от ${from.charAt(0).toUpperCase() + from.slice(1)}`, { from });
+          }
+        } catch (e) {
+          console.error('[presence.signal] handleIncomingMessage threw', e);
+        }
+        return;
+      }
+
+      // другие типы сигналов — логируем
+      console.log('signal from', from, payload);
+    } catch (e) {
+      console.error('signal handler error', e);
+    }
+  });
+  // p.on('open'...)
 }
