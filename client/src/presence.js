@@ -2,6 +2,8 @@
 
 import { updateOnlineList, handleIncomingMessage, showInAppToast } from "./userList.js";
 import { state, setPresenceClient } from './state.js';
+import { handleCallSignal } from './userCall.js';
+
 
 // создаёт клиента, подключает его и синхронизирует с видимостью страницы
 export async function ensurePresenceClient() {
@@ -90,11 +92,21 @@ function createPresenceClient(opts = {}) {
       let msg;
       try { msg = JSON.parse(e.data); } catch (err) { return; }
       if (msg && msg.type === 'presence') {
-        listeners.presence.forEach(fn => { try { fn(msg.online || []); } catch (e) { } });
+        listeners.presence.forEach(fn => {
+          try {
+            fn(msg.online || []);
+          } catch (e) { }
+        });
       } else if (msg && msg.type === 'signal') {
-        listeners.signal.forEach(fn => { try { fn(msg.from, msg.payload); } catch (e) { } });
+        listeners.signal.forEach(fn => {
+          try {
+            fn(msg.from, msg.payload);
+          } catch (e) { }
+        });
       } else if (msg && msg.type === 'list') {
-        listeners.presence.forEach(fn => { try { fn(msg.online || []); } catch (e) { } });
+        listeners.presence.forEach(fn => {
+          try { fn(msg.online || []); } catch (e) { }
+        });
       }
     });
 
@@ -182,7 +194,16 @@ function createPresenceClient(opts = {}) {
       }
 
       // ограничение типов: разрешаем только определённые типы сообщений
-      const allowedTypes = ['chat_message', 'chat_receipt'];
+      const allowedTypes = [
+        'chat_message',
+        'chat_receipt',
+        // звонки (сигналинг для WebRTC)
+        'call_offer',      // инициатор -> ответчик (включает callId, sdp)
+        'call_answer',     // ответчик -> инициатор (callId, sdp)
+        'call_candidate',  // ICE кандидаты (callId, candidate)
+        'call_end'         // завершение звонка (callId, reason?)
+      ];
+
       if (!payload.type || allowedTypes.indexOf(payload.type) === -1) {
         throw new Error('unsupported payload.type');
       }
@@ -289,6 +310,16 @@ function attachPresenceListeners(p) {
   p.on('signal', async (from, payload) => {
     try {
       console.log('[presence.signal] from=', from, 'payload=', payload);
+
+      // если это звонковый сигнал — делегируем и выходим
+      if (payload && typeof payload.type === 'string' && payload.type.startsWith('call_')) {
+        try {
+          handleCallSignal(from, payload);
+        } catch (e) {
+          console.error('[presence.signal] call handler threw', e);
+        }
+        return;
+      }
 
       // Обрабатываем и chat_message, и chat_receipt через один обработчик,
       // который делегирует детали в handleIncomingMessage.

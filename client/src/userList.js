@@ -11,6 +11,7 @@ import {
 import { state } from './state.js';
 import { isSameDay, formatTimeOnly, formatDateHeader, normKey } from './utils.js';
 import { createTopBarIfMissing } from './ui.js';
+import { initiateCallTo, attachCallButtonHandler } from './userCall.js';
 
 
 // открыть БД pwa-chat и вернуть Promise<db>
@@ -376,7 +377,8 @@ function renderUserList(users) {
     callBtn.title = 'Позвонить';
     callBtn.textContent = '📞';
     callBtn.addEventListener('click', () => {
-      alert('Инициация звонка пользователю: ' + (u.displayName || userKeyNorm));
+      initiateCallTo(userKeyNorm);
+      // alert('Инициация звонка пользователю: ' + (u.displayName || userKeyNorm));
     });
 
     // элемент бейджа непрочитанных
