@@ -75,7 +75,7 @@ export function getInputValues() {
   slug = slug.toLowerCase()
     .replace(/[^a-zа-яё0-9 _\-]/g, "") // кириллица + латиница + цифры
     .trim()
-    .replace(/\s+/g, "-")
+    // .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
 
