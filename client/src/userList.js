@@ -11,7 +11,7 @@ import {
 import { state } from './state.js';
 import { isSameDay, formatTimeOnly, formatDateHeader, normKey } from './utils.js';
 import { createTopBarIfMissing } from './ui.js';
-import { initiateCallTo, attachCallButtonHandler } from './userCall.js';
+import { initiateCallTo } from './userCall.js';
 
 
 // открыть БД pwa-chat и вернуть Promise<db>

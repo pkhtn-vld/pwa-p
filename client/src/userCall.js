@@ -3,6 +3,29 @@
 
 import { state } from './state.js';
 
+// helper: получить ICE-серверы (TURN/STUN) с сервера; если не удалось — вернуть fallback STUN
+// comment: запрашиваем защищённый маршрут /get-turn-credentials (требует авторизации)
+async function getIceServers() {
+  try {
+    console.log('// call: запрашиваю ICE-серверы с /get-turn-credentials');
+    const resp = await fetch('/get-turn-credentials', { credentials: 'include' });
+    if (!resp.ok) {
+      console.warn('// call: /get-turn-credentials вернул не OK, статус=', resp.status);
+      return [{ urls: 'stun:stun.l.google.com:19302' }];
+    }
+    const json = await resp.json().catch(() => null);
+    if (!json || !Array.isArray(json.iceServers) || json.iceServers.length === 0) {
+      console.log('// call: пустой список iceServers от сервера — использую fallback STUN');
+      return [{ urls: 'stun:stun.l.google.com:19302' }];
+    }
+    console.log('// call: получил iceServers, count=', json.iceServers.length);
+    return json.iceServers;
+  } catch (e) {
+    console.warn('// call: ошибка при запросе iceServers, использую fallback STUN', e);
+    return [{ urls: 'stun:stun.l.google.com:19302' }];
+  }
+}
+
 // Небольшой локальный toast (чтобы не тянуть зависимости и не создавать циклических импортов)
 function localToast(text) {
   try {
@@ -141,6 +164,12 @@ function cleanupCall(callId) {
       try { info.pc.close(); } catch (e) { /* ignore */ }
       info.pc = null;
     }
+
+    // очистить таймаут, если установлен
+    try {
+      if (info.timeoutId) { clearTimeout(info.timeoutId); info.timeoutId = null; }
+    } catch (e) { /* ignore */ }
+
     // остановить локальные треки
     if (info.localStream) {
       try { info.localStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} }); } catch (e) {}
@@ -168,95 +197,40 @@ async function acquireMic() {
 
 // Инициатор звонка
 export async function initiateCallTo(userKey) {
-  console.log('[call][init] enter initiateCallTo userKey=', userKey);
+  console.log('// call: enter initiateCallTo userKey=', userKey);
   try {
-    if (!state.presenceClient) { console.warn('[call][init] no state.presenceClient'); localToast('Нет WS соединения'); return; }
+    if (!state.presenceClient) { console.warn('// call: нет state.presenceClient'); localToast('Нет WS соединения'); return; }
     const me = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
-    if (!me) { console.warn('[call][init] no local userName'); localToast('Неавторизован'); return; }
+    if (!me) { console.warn('// call: неавторизован'); localToast('Неавторизован'); return; }
     const to = String(userKey).toLowerCase();
     const callId = makeId();
     const outgoingUI = showOutgoingUI(callId, to);
 
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' }
-        // при необходимости добавь TURN здесь
-      ]
-    });
+    // comment: получаем iceServers (TURN/STUN) с сервера; fallback на публичный STUN
+    const iceServers = await getIceServers();
+    const pc = new RTCPeerConnection({ iceServers });
 
     // Логи состояний для отладки
-    pc.oniceconnectionstatechange = () => console.log('[call][init] oniceconnectionstatechange', callId, pc.iceConnectionState);
-    pc.onconnectionstatechange = () => console.log('[call][init] onconnectionstatechange', callId, pc.connectionState);
-    pc.onicegatheringstatechange = () => console.log('[call][init] onicegatheringstatechange', callId, pc.iceGatheringState);
+    pc.oniceconnectionstatechange = () => console.log('// call: oniceconnectionstatechange', callId, pc.iceConnectionState);
+    pc.onconnectionstatechange = () => console.log('// call: onconnectionstatechange', callId, pc.connectionState);
+    pc.onicegatheringstatechange = () => console.log('// call: onicegatheringstatechange', callId, pc.iceGatheringState);
 
     let localStream;
     try {
       localStream = await acquireMic();
-      console.log('[call][init] acquired localStream, audio tracks:', localStream.getAudioTracks());
+      console.log('// call: acquired localStream, audio tracks:', localStream.getAudioTracks());
     } catch (e) {
       removeUI(outgoingUI);
       localToast('Доступ к микрофону отклонён');
-      console.warn('[call][init] getUserMedia failed', e);
+      console.warn('// call: getUserMedia failed', e);
       return;
     }
 
     // добавляем локальные треки до создания offer
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-    console.log('[call][init] added local tracks to pc; pc.getSenders():', pc.getSenders());
+    console.log('// call: added local tracks to pc; pc.getSenders():', pc.getSenders());
 
-    // --- создаём локальный AudioContext + analyser для мониторинга уровня микрофона ---
-    try {
-      const ac = new (window.AudioContext || window.webkitAudioContext)();
-      const src = ac.createMediaStreamSource(localStream);
-      const analyser = ac.createAnalyser();
-      analyser.fftSize = 2048;
-      src.connect(analyser);
-      // сохраняем в activeCalls позже
-      // вычисление RMS каждые 300ms
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      const levelIntervalId = setInterval(() => {
-        analyser.getByteTimeDomainData(data);
-        // compute RMS-ish
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) {
-          const v = (data[i] - 128) / 128;
-          sum += v * v;
-        }
-        const rms = Math.sqrt(sum / data.length);
-        console.log('[call][init] local mic level', callId, rms.toFixed(4));
-      }, 300);
-      // attach to activeCalls info after created
-      // we'll attach these below
-      // store placeholder now
-      // (we'll set actual via activeCalls.set)
-      // analyser & interval will be stored in info
-      // but keep references here to assign later if needed
-      // no-op
-      // end analyser setup
-      // We'll attach ac, analyser, intervalId to info below
-      // (wrapped in try/catch)
-      // save temporaries:
-      var _localAudioContext = ac;
-      var _localAnalyser = analyser;
-      var _localLevelIntervalId = levelIntervalId;
-    } catch (e) {
-      console.warn('[call][init] failed to create local AudioContext/analyser', e);
-    }
-
-    // ICE кандидаты — отправляем в JSON форме и логируем
-    pc.onicecandidate = (ev) => {
-      if (ev && ev.candidate) {
-        try {
-          const cand = ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate;
-          console.log('[call][init] sending candidate', callId, cand);
-          state.presenceClient.sendSignal(to, { type: 'call_candidate', callId, candidate: cand });
-        } catch (err) {
-          console.warn('[call][init] send candidate failed', err);
-        }
-      }
-    };
-
-    // ontrack — воспроизводим и создаём analyser для remote stream
+    // ontrack — воспроизводим удалённый поток и пытаемся play()
     pc.ontrack = (ev) => {
       try {
         let audio = document.getElementById('call-audio-' + callId);
@@ -272,84 +246,60 @@ export async function initiateCallTo(userKey) {
         audio.volume = 1.0;
         const remoteStream = (ev.streams && ev.streams[0]) || ev.stream || null;
         audio.srcObject = remoteStream;
-        console.log('[call][init] ontrack set srcObject', callId, remoteStream);
-
-        // создаём analyser для remote потока
-        try {
-          const ac2 = new (window.AudioContext || window.webkitAudioContext)();
-          const src2 = ac2.createMediaStreamSource(remoteStream);
-          const analyser2 = ac2.createAnalyser();
-          analyser2.fftSize = 2048;
-          src2.connect(analyser2);
-          const data2 = new Uint8Array(analyser2.frequencyBinCount);
-          const remoteInterval = setInterval(() => {
-            analyser2.getByteTimeDomainData(data2);
-            let sum = 0;
-            for (let i = 0; i < data2.length; i++) {
-              const v = (data2[i] - 128) / 128;
-              sum += v * v;
-            }
-            const rms2 = Math.sqrt(sum / data2.length);
-            console.log('[call][init] remote audio level', callId, rms2.toFixed(4));
-          }, 300);
-          // привяжем к activeCalls запись (если уже есть)
-          const cur = activeCalls.get(callId) || {};
-          cur.remoteAudioContext = ac2;
-          cur.remoteAnalyser = analyser2;
-          cur.remoteLevelIntervalId = remoteInterval;
-          activeCalls.set(callId, cur);
-        } catch (e) {
-          console.warn('[call][init] failed to create remote analyser', e);
-        }
-
+        console.log('// call: ontrack set srcObject', callId, remoteStream);
         audio.play().then(() => {
-          console.log('[call][init] audio.play OK', callId);
+          console.log('// call: audio.play OK', callId);
         }).catch((err) => {
-          console.warn('[call][init] audio.play failed', callId, err);
+          console.warn('// call: audio.play failed', callId, err);
         });
       } catch (e) {
-        console.error('[call][init] ontrack handler failed', callId, e);
+        console.error('// call: ontrack handler failed', callId, e);
+      }
+    };
+
+    // ICE кандидаты — отправляем в JSON форме и логируем
+    pc.onicecandidate = (ev) => {
+      if (ev && ev.candidate) {
+        try {
+          const cand = ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate;
+          console.log('// call: sending candidate', callId, cand);
+          state.presenceClient.sendSignal(to, { type: 'call_candidate', callId, candidate: cand });
+        } catch (err) {
+          console.warn('// call: send candidate failed', err);
+        }
       }
     };
 
     // create offer
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    console.log('[call][init] created offer, local SDP length:', (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0);
+    console.log('// call: created offer, local SDP length:', (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0);
 
-    // assemble info object and attach analyser refs if created
+    // assemble info and save
     const info = { pc, localStream, role: 'caller', to, uiIds: { outgoing: outgoingUI } };
-    try {
-      if (typeof _localAudioContext !== 'undefined') {
-        info.localAudioContext = _localAudioContext;
-        info.localAnalyser = _localAnalyser;
-        info.levelIntervalId = _localLevelIntervalId;
-      }
-    } catch (e) { /* ignore */ }
-
     activeCalls.set(callId, info);
 
     // send offer via presenceClient (sdp string)
     try {
       state.presenceClient.sendSignal(to, { type: 'call_offer', callId, sdp: offer.sdp });
-      console.log('[call][init] sent call_offer', callId, 'to', to);
+      console.log('// call: sent call_offer', callId, 'to', to);
     } catch (e) {
-      console.warn('[call][init] sendSignal call_offer failed', e);
+      console.warn('// call: sendSignal call_offer failed', e);
     }
 
     // set timeout for no-answer
     const toId = setTimeout(() => {
-      try { if (state.presenceClient) state.presenceClient.sendSignal(to, { type: 'call_end', callId, reason: 'timeout' }); } catch (e) {}
+      try { if (state.presenceClient) state.presenceClient.sendSignal(to, { type: 'call_end', callId, reason: 'timeout' }); } catch (e) { }
       cleanupCall(callId);
       localToast('Абонент не ответил');
-      console.log('[call][init] timeout cleanup for', callId);
+      console.log('// call: timeout cleanup for', callId);
     }, 30000);
     const savedInfo = activeCalls.get(callId) || {};
     savedInfo.timeoutId = toId;
     activeCalls.set(callId, savedInfo);
 
   } catch (e) {
-    console.error('initiateCallTo error', e);
+    console.error('// call: initiateCallTo error', e);
     localToast('Не удалось начать звонок');
   }
 }
@@ -359,73 +309,45 @@ async function acceptCall(from, callId) {
   try {
     const info = activeCalls.get(callId) || {};
 
-    // создаём pc с STUN (как у инициатора)
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' }
-      ]
-    });
+    // получаем iceServers от сервера (TURN/STUN) — тот же набор, что использовал инициатор
+    const iceServers = await getIceServers();
+    const pc = new RTCPeerConnection({ iceServers });
 
     // Логи состояний для отладки
-    pc.oniceconnectionstatechange = () => console.log('[call][accept] oniceconnectionstatechange', callId, pc.iceConnectionState);
-    pc.onconnectionstatechange = () => console.log('[call][accept] onconnectionstatechange', callId, pc.connectionState);
-    pc.onicegatheringstatechange = () => console.log('[call][accept] onicegatheringstatechange', callId, pc.iceGatheringState);
+    pc.oniceconnectionstatechange = () => console.log('// call: oniceconnectionstatechange', callId, pc.iceConnectionState);
+    pc.onconnectionstatechange = () => console.log('// call: onconnectionstatechange', callId, pc.connectionState);
+    pc.onicegatheringstatechange = () => console.log('// call: onicegatheringstatechange', callId, pc.iceGatheringState);
 
     let localStream;
     try {
       localStream = await acquireMic();
-      console.log('[call][accept] acquired localStream, audio tracks:', localStream.getAudioTracks());
+      console.log('// call: acquired localStream, audio tracks:', localStream.getAudioTracks());
     } catch (e) {
       localToast('Нужен доступ к микрофону');
-      console.warn('[call][accept] getUserMedia failed', e);
-      try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'media_denied' }); } catch (e) {}
+      console.warn('// call: getUserMedia failed', e);
+      try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'media_denied' }); } catch (e) { }
       cleanupCall(callId);
       return;
     }
 
     // добавляем локальные треки
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-    console.log('[call][accept] added local tracks to pc; pc.getSenders():', pc.getSenders());
-
-    // local analyser (опционально, если у тебя это есть)
-    try {
-      const ac = new (window.AudioContext || window.webkitAudioContext)();
-      const src = ac.createMediaStreamSource(localStream);
-      const analyser = ac.createAnalyser();
-      analyser.fftSize = 2048;
-      src.connect(analyser);
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      const levelIntervalId = setInterval(() => {
-        analyser.getByteTimeDomainData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) {
-          const v = (data[i] - 128) / 128;
-          sum += v * v;
-        }
-        const rms = Math.sqrt(sum / data.length);
-        console.log('[call][accept] local mic level', callId, rms.toFixed(4));
-      }, 300);
-      info.localAudioContext = ac;
-      info.localAnalyser = analyser;
-      info.levelIntervalId = levelIntervalId;
-    } catch (e) {
-      console.warn('[call][accept] failed to create local analyser', e);
-    }
+    console.log('// call: added local tracks to pc; pc.getSenders():', pc.getSenders());
 
     // ICE кандидаты — отправляем в JSON форме и логируем
     pc.onicecandidate = (ev) => {
       if (ev && ev.candidate) {
         try {
           const cand = ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate;
-          console.log('[call][accept] sending candidate', callId, cand);
+          console.log('// call: sending candidate', callId, cand);
           state.presenceClient.sendSignal(from, { type: 'call_candidate', callId, candidate: cand });
         } catch (err) {
-          console.warn('[call][accept] send candidate failed', err);
+          console.warn('// call: send candidate failed', err);
         }
       }
     };
 
-    // ontrack — воспроизводим и создаём analyser для remote stream
+    // ontrack — воспроизводим remote stream и play()
     pc.ontrack = (ev) => {
       try {
         let audio = document.getElementById('call-audio-' + callId);
@@ -441,99 +363,72 @@ async function acceptCall(from, callId) {
         audio.volume = 1.0;
         const remoteStream = (ev.streams && ev.streams[0]) || ev.stream || null;
         audio.srcObject = remoteStream;
-        console.log('[call][accept] ontrack set srcObject', callId, remoteStream);
-
-        // remote analyser
-        try {
-          const ac2 = new (window.AudioContext || window.webkitAudioContext)();
-          const src2 = ac2.createMediaStreamSource(remoteStream);
-          const analyser2 = ac2.createAnalyser();
-          analyser2.fftSize = 2048;
-          src2.connect(analyser2);
-          const data2 = new Uint8Array(analyser2.frequencyBinCount);
-          const remoteInterval = setInterval(() => {
-            analyser2.getByteTimeDomainData(data2);
-            let sum = 0;
-            for (let i = 0; i < data2.length; i++) {
-              const v = (data2[i] - 128) / 128;
-              sum += v * v;
-            }
-            const rms2 = Math.sqrt(sum / data2.length);
-            console.log('[call][accept] remote audio level', callId, rms2.toFixed(4));
-          }, 300);
-          info.remoteAudioContext = ac2;
-          info.remoteAnalyser = analyser2;
-          info.remoteLevelIntervalId = remoteInterval;
-        } catch (e) {
-          console.warn('[call][accept] failed to create remote analyser', e);
-        }
-
+        console.log('// call: ontrack set srcObject', callId, remoteStream);
         audio.play().then(() => {
-          console.log('[call][accept] audio.play OK', callId);
+          console.log('// call: audio.play OK', callId);
         }).catch((err) => {
-          console.warn('[call][accept] audio.play failed', callId, err);
+          console.warn('// call: audio.play failed', callId, err);
         });
       } catch (e) {
-        console.error('[call][accept] ontrack handler failed', callId, e);
+        console.error('// call: ontrack handler failed', callId, e);
       }
     };
 
-    // set remote (offer) if present
+    // set remote (offer) если есть
     if (!info.offerSdp) {
-      console.warn('[call][accept] no offerSdp for callId', callId, 'from', from);
-      try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'no_offer' }); } catch (e) {}
+      console.warn('// call: no offerSdp for callId', callId, 'from', from);
+      try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'no_offer' }); } catch (e) { }
       cleanupCall(callId);
       return;
     }
 
-    console.log('[call][accept] setting remoteDescription (offer) for', callId);
+    console.log('// call: setting remoteDescription (offer) for', callId);
     await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: info.offerSdp }));
 
-    // --- APPLY any pending candidates that arrived BEFORE pc was created ---
+    // Если до создания pc приходили кандидаты — применим их
     try {
       if (info.pendingCandidates && info.pendingCandidates.length) {
-        console.log('[call][accept] applying', info.pendingCandidates.length, 'pending candidates for', callId);
+        console.log('// call: applying', info.pendingCandidates.length, 'pending candidates for', callId);
         for (const cand of info.pendingCandidates) {
           try {
             await pc.addIceCandidate(new RTCIceCandidate(cand));
-            console.log('[call][accept] applied pending candidate', callId, cand);
+            console.log('// call: applied pending candidate', callId, cand);
           } catch (e) {
-            console.warn('[call][accept] failed applying pending candidate', e, cand);
+            console.warn('// call: failed applying pending candidate', e, cand);
           }
         }
-        // clear pending
         info.pendingCandidates = [];
       }
     } catch (e) {
-      console.warn('[call][accept] pendingCandidates apply step failed', e);
+      console.warn('// call: pendingCandidates apply step failed', e);
     }
 
-    console.log('[call][accept] remoteDescription set, creating answer', callId);
+    console.log('// call: remoteDescription set, creating answer', callId);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    console.log('[call][accept] localDescription (answer) set, local SDP length:', (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0);
+    console.log('// call: localDescription (answer) set, local SDP length:', (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0);
 
-    // send answer (sdp)
+    // отправляем answer
     try {
       state.presenceClient.sendSignal(from, { type: 'call_answer', callId, sdp: answer.sdp });
-      console.log('[call][accept] sent call_answer', callId);
+      console.log('// call: sent call_answer', callId);
     } catch (e) {
-      console.warn('[call][accept] sendSignal call_answer failed', e);
+      console.warn('// call: sendSignal call_answer failed', e);
     }
 
-    // update state
+    // обновляем инфо в activeCalls
     info.pc = pc;
     info.localStream = localStream;
     info.role = 'callee';
     activeCalls.set(callId, info);
 
-    // remove incoming UI
+    // убрать incoming UI
     if (info.uiIds && info.uiIds.incoming) removeUI(info.uiIds.incoming);
     localToast('Звонок принят');
   } catch (e) {
-    console.error('acceptCall failed', e);
+    console.error('// call: acceptCall failed', e);
     localToast('Ошибка при принятии звонка');
-    try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'answer_failed' }); } catch (er) {}
+    try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'answer_failed' }); } catch (er) { }
     cleanupCall(callId);
   }
 }
@@ -583,21 +478,31 @@ export async function handleCallSignal(from, payload) {
     }
 
     if (type === 'call_candidate') {
+
+      // защитимся: игнорируем пустые кандидаты
+      if (!payload || !payload.candidate) {
+        console.warn('// call: получен пустой candidate, игнорирую', callId);
+        return;
+      }
+
       // buffer candidate if pc not created yet
       const info = activeCalls.get(callId) || {};
       if (!info.pc) {
         // store candidate for later applying
         info.pendingCandidates = info.pendingCandidates || [];
-        info.pendingCandidates.push(payload.candidate);
+        // предотвращаем дублирование одного и того же кандидата
+        if (!info.pendingCandidates.find(c => String(c) === String(payload.candidate))) {
+          info.pendingCandidates.push(payload.candidate);
+        }
         activeCalls.set(callId, info);
-        console.log('[call][handle] saved pending candidate for', callId, payload.candidate);
+        console.log('// call: сохранён pending candidate для', callId);
         return;
       }
       try {
-        console.log('[call][handle] adding candidate for', callId, payload.candidate);
+        console.log('// call: добавляю candidate в pc для', callId);
         await info.pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
       } catch (e) {
-        console.warn('[call][handle] addIceCandidate failed', e);
+        console.warn('// call: addIceCandidate не удался', e);
       }
       return;
     }
