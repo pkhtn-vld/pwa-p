@@ -126,8 +126,36 @@ function attachPresence(httpServer, opts = {}) {
               console.warn('Failed to send to a socket for', toKey, e && e.message);
             }
           }
-          if (visibleOpenCount  > 0) delivered = true;
+          if (visibleOpenCount > 0) delivered = true;
         }
+
+        // подробный лог о доставке
+        console.log(`// ws: signal from=${ws._meta.userKey} to=${toKey} type=${msg.payload && msg.payload.type} delivered=${delivered} openCount=${openCount} visibleOpenCount=${visibleOpenCount}`);
+
+        // отправка серверного лога в отдельный endpoint /debug/log не обязательна,
+        // но может быть полезной для централизованного сбора — посылаем асинхронно (без await)
+        try {
+          const serverLog = {
+            ts: new Date().toISOString(),
+            src: 'presenceService',
+            event: 'signal',
+            from: ws._meta.userKey,
+            to: toKey,
+            type: msg.payload && msg.payload.type,
+            callId: msg.payload && msg.payload.callId,
+            delivered,
+            openCount,
+            visibleOpenCount
+          };
+          try {
+            fetch('http://127.0.0.1:' + (opts && opts.debugPort ? opts.debugPort : (process.env.DEBUG_PORT || '3000')) + '/debug/log', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(serverLog)
+            }).catch(() => {/* ignore */ });
+          } catch (e) { /* ignore */ }
+        } catch (e) { /* ignore */ }
+
 
         if (opts.onSignal) {
           try { opts.onSignal(ws._meta.userKey, toKey, msg.payload || null, delivered); } catch (e) { /* ignore */ }

@@ -3,17 +3,65 @@
 
 import { state } from './state.js';
 
-// helper: получить ICE-серверы (TURN/STUN) с сервера; если не удалось — вернуть fallback STUN
+
+// // comment: вспомогательная функция для отправки структурированных логов на сервер
+function _sendClientCallLog(kind, data) {
+  try {
+    const payload = {
+      ts: new Date().toISOString(),
+      src: 'client-userCall',
+      kind,
+      data
+    };
+    // // comment: лог в консоль (для локальной отладки)
+    console.log('// call: client-log', kind, data);
+    // // comment: отправим на сервер, не дожидаемся ответа
+    fetch('/debug/log', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).catch(() => {/* ignore */ });
+  } catch (e) { /* ignore */ }
+}
+
 // comment: запрашиваем защищённый маршрут /get-turn-credentials (требует авторизации)
 async function getIceServers() {
+  // // comment: запрашиваем ICE-серверы у сервера и подробно логируем результат.
   try {
     console.log('// call: запрашиваю ICE-серверы с /get-turn-credentials');
-    const resp = await fetch('/get-turn-credentials', { credentials: 'include' });
+    // // comment: посылаем короткий диагностический заголовок, сервер может логировать запрос
+    const resp = await fetch('/get-turn-credentials', {
+      credentials: 'include',
+      headers: { 'X-Debug-Call': '1' }
+    });
+    // // comment: логируем HTTP статус
+    console.log(`// call: /get-turn-credentials статус=${resp.status}`);
+    let body = null;
+    try { body = await resp.clone().json(); } catch (e) { body = await resp.text().catch(() => null); }
+    // // comment: логируем тело ответа в консоль
+    console.log('// call: /get-turn-credentials ответ body=', body);
+
+    // // comment: отправляем диагностический лог на сервер, чтобы его можно было собрать централизовано
+    try {
+      fetch('/debug/log', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ts: new Date().toISOString(),
+          src: 'client-getIceServers',
+          status: resp.status,
+          body: body
+        })
+      }).catch(() => {/* ignore */ });
+    } catch (e) { /* ignore */ }
+
     if (!resp.ok) {
-      console.warn('// call: /get-turn-credentials вернул не OK, статус=', resp.status);
+      console.warn('// call: /get-turn-credentials вернул не OK, использую fallback STUN');
       return [{ urls: 'stun:stun.l.google.com:19302' }];
     }
-    const json = await resp.json().catch(() => null);
+    const json = (typeof body === 'object' ? body : null);
     if (!json || !Array.isArray(json.iceServers) || json.iceServers.length === 0) {
       console.log('// call: пустой список iceServers от сервера — использую fallback STUN');
       return [{ urls: 'stun:stun.l.google.com:19302' }];
@@ -22,6 +70,14 @@ async function getIceServers() {
     return json.iceServers;
   } catch (e) {
     console.warn('// call: ошибка при запросе iceServers, использую fallback STUN', e);
+    try {
+      fetch('/debug/log', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ts: new Date().toISOString(), src: 'client-getIceServers-error', error: String(e) })
+      }).catch(() => {/* ignore */ });
+    } catch (er) { }
     return [{ urls: 'stun:stun.l.google.com:19302' }];
   }
 }
@@ -45,14 +101,14 @@ function localToast(text) {
     }
     el.textContent = text;
     el.style.display = 'block';
-    setTimeout(() => { try { el.style.display = 'none'; } catch (e) {} }, 3000);
+    setTimeout(() => { try { el.style.display = 'none'; } catch (e) { } }, 3000);
   } catch (e) { console.log(text); }
 }
 
 const activeCalls = new Map(); // callId -> { pc, localStream, role, to/from, offerSdp, uiIds }
 
 // утилита
-function makeId() { return String(Math.random()).slice(2,10) + '-' + Date.now(); }
+function makeId() { return String(Math.random()).slice(2, 10) + '-' + Date.now(); }
 
 // UI: показать входящий попап
 function showIncomingUI(from, callId) {
@@ -101,7 +157,7 @@ function showIncomingUI(from, callId) {
   });
   reject.addEventListener('click', () => {
     // отправим call_end
-    try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'rejected' }); } catch (e) {}
+    try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'rejected' }); } catch (e) { }
     cleanupCall(callId);
   });
 
@@ -127,7 +183,7 @@ function showOutgoingUI(callId, to) {
   return id;
 }
 
-function removeUI(id) { const el = document.getElementById(id); if (el) try { el.remove(); } catch (e) {} }
+function removeUI(id) { const el = document.getElementById(id); if (el) try { el.remove(); } catch (e) { } }
 
 // cleanup
 function cleanupCall(callId) {
@@ -154,8 +210,8 @@ function cleanupCall(callId) {
     try {
       const audioEl = document.getElementById('call-audio-' + callId);
       if (audioEl) {
-        try { audioEl.srcObject = null; } catch (e) {}
-        try { audioEl.remove(); } catch (e) {}
+        try { audioEl.srcObject = null; } catch (e) { }
+        try { audioEl.remove(); } catch (e) { }
       }
     } catch (e) { /* ignore */ }
 
@@ -164,15 +220,13 @@ function cleanupCall(callId) {
       try { info.pc.close(); } catch (e) { /* ignore */ }
       info.pc = null;
     }
-
     // очистить таймаут, если установлен
     try {
       if (info.timeoutId) { clearTimeout(info.timeoutId); info.timeoutId = null; }
     } catch (e) { /* ignore */ }
-
     // остановить локальные треки
     if (info.localStream) {
-      try { info.localStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} }); } catch (e) {}
+      try { info.localStream.getTracks().forEach(t => { try { t.stop(); } catch (e) { } }); } catch (e) { }
       info.localStream = null;
     }
     // удалить UI
@@ -197,40 +251,67 @@ async function acquireMic() {
 
 // Инициатор звонка
 export async function initiateCallTo(userKey) {
+  // // comment: инициируем звонок и логируем каждый важный шаг и ошибку
   console.log('// call: enter initiateCallTo userKey=', userKey);
+  _sendClientCallLog('initiate_start', { to: userKey });
+
   try {
-    if (!state.presenceClient) { console.warn('// call: нет state.presenceClient'); localToast('Нет WS соединения'); return; }
+    if (!state.presenceClient) {
+      console.warn('// call: нет state.presenceClient');
+      _sendClientCallLog('error', { reason: 'no_presence_client' });
+      localToast('Нет WS соединения');
+      return;
+    }
     const me = (localStorage.getItem('pwaUserName') || '').trim().toLowerCase();
-    if (!me) { console.warn('// call: неавторизован'); localToast('Неавторизован'); return; }
+    if (!me) {
+      console.warn('// call: неавторизован');
+      _sendClientCallLog('error', { reason: 'not_authenticated' });
+      localToast('Неавторизован');
+      return;
+    }
     const to = String(userKey).toLowerCase();
     const callId = makeId();
     const outgoingUI = showOutgoingUI(callId, to);
+    _sendClientCallLog('create_call', { callId, to, me });
 
-    // comment: получаем iceServers (TURN/STUN) с сервера; fallback на публичный STUN
     const iceServers = await getIceServers();
+    _sendClientCallLog('ice_servers', { callId, iceServers });
+
     const pc = new RTCPeerConnection({ iceServers });
 
-    // Логи состояний для отладки
-    pc.oniceconnectionstatechange = () => console.log('// call: oniceconnectionstatechange', callId, pc.iceConnectionState);
-    pc.onconnectionstatechange = () => console.log('// call: onconnectionstatechange', callId, pc.connectionState);
-    pc.onicegatheringstatechange = () => console.log('// call: onicegatheringstatechange', callId, pc.iceGatheringState);
+    // // comment: логируем состояния соединения
+    pc.oniceconnectionstatechange = () => {
+      console.log(`// call: oniceconnectionstatechange ${callId} ${pc.iceConnectionState}`);
+      _sendClientCallLog('iceconnectionstate', { callId, state: pc.iceConnectionState });
+    };
+    pc.onconnectionstatechange = () => {
+      console.log(`// call: onconnectionstatechange ${callId} ${pc.connectionState}`);
+      _sendClientCallLog('connectionstate', { callId, state: pc.connectionState });
+    };
+    pc.onicegatheringstatechange = () => {
+      console.log(`// call: onicegatheringstatechange ${callId} ${pc.iceGatheringState}`);
+      _sendClientCallLog('icegatheringstate', { callId, state: pc.iceGatheringState });
+    };
 
     let localStream;
     try {
       localStream = await acquireMic();
       console.log('// call: acquired localStream, audio tracks:', localStream.getAudioTracks());
+      _sendClientCallLog('media_acquired', { callId, tracks: localStream.getAudioTracks().map(t => ({ kind: t.kind, id: t.id, enabled: t.enabled })) });
     } catch (e) {
       removeUI(outgoingUI);
       localToast('Доступ к микрофону отклонён');
       console.warn('// call: getUserMedia failed', e);
+      _sendClientCallLog('error', { callId, reason: 'getUserMedia_failed', err: String(e) });
       return;
     }
 
-    // добавляем локальные треки до создания offer
+    // // comment: добавляем локальные треки и логируем senders
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
     console.log('// call: added local tracks to pc; pc.getSenders():', pc.getSenders());
+    _sendClientCallLog('tracks_added', { callId, senders: pc.getSenders().map(s => ({ id: s.track && s.track.id })) });
 
-    // ontrack — воспроизводим удалённый поток и пытаемся play()
+    // // comment: ontrack — воспроизводим удалённый поток и логируем play и события аудиоэлемента
     pc.ontrack = (ev) => {
       try {
         let audio = document.getElementById('call-audio-' + callId);
@@ -247,107 +328,153 @@ export async function initiateCallTo(userKey) {
         const remoteStream = (ev.streams && ev.streams[0]) || ev.stream || null;
         audio.srcObject = remoteStream;
         console.log('// call: ontrack set srcObject', callId, remoteStream);
+        _sendClientCallLog('ontrack', { callId, remoteStreamTracks: (remoteStream && remoteStream.getTracks().map(t => ({ id: t.id, kind: t.kind }))) });
+        audio.addEventListener('canplay', () => {
+          console.log('// call: audio canplay', callId);
+          _sendClientCallLog('audio_event', { callId, event: 'canplay' });
+        }, { once: true });
+        audio.addEventListener('error', (err) => {
+          console.warn('// call: audio element error', callId, err);
+          _sendClientCallLog('audio_event', { callId, event: 'error', error: String(err) });
+        });
         audio.play().then(() => {
           console.log('// call: audio.play OK', callId);
+          _sendClientCallLog('audio_play', { callId, ok: true });
         }).catch((err) => {
           console.warn('// call: audio.play failed', callId, err);
+          _sendClientCallLog('audio_play', { callId, ok: false, error: String(err) });
         });
       } catch (e) {
         console.error('// call: ontrack handler failed', callId, e);
+        _sendClientCallLog('error', { callId, where: 'ontrack_handler', err: String(e) });
       }
     };
 
-    // ICE кандидаты — отправляем в JSON форме и логируем
+    // // comment: ICE кандидаты — отправляем и журналируем
     pc.onicecandidate = (ev) => {
       if (ev && ev.candidate) {
         try {
           const cand = ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate;
           console.log('// call: sending candidate', callId, cand);
+          _sendClientCallLog('local_candidate', { callId, candidate: cand });
           state.presenceClient.sendSignal(to, { type: 'call_candidate', callId, candidate: cand });
         } catch (err) {
           console.warn('// call: send candidate failed', err);
+          _sendClientCallLog('error', { callId, where: 'send_candidate', err: String(err) });
         }
       }
     };
 
-    // create offer
+    // // comment: create offer
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     console.log('// call: created offer, local SDP length:', (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0);
+    _sendClientCallLog('offer_created', { callId, sdpLen: (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0 });
 
-    // assemble info and save
     const info = { pc, localStream, role: 'caller', to, uiIds: { outgoing: outgoingUI } };
     activeCalls.set(callId, info);
 
-    // send offer via presenceClient (sdp string)
     try {
       state.presenceClient.sendSignal(to, { type: 'call_offer', callId, sdp: offer.sdp });
       console.log('// call: sent call_offer', callId, 'to', to);
+      _sendClientCallLog('offer_sent', { callId, to });
     } catch (e) {
       console.warn('// call: sendSignal call_offer failed', e);
+      _sendClientCallLog('error', { callId, where: 'send_offer', err: String(e) });
     }
 
-    // set timeout for no-answer
+    // // comment: таймаут и периодический сбор getStats для мониторинга RTP
     const toId = setTimeout(() => {
       try { if (state.presenceClient) state.presenceClient.sendSignal(to, { type: 'call_end', callId, reason: 'timeout' }); } catch (e) { }
       cleanupCall(callId);
       localToast('Абонент не ответил');
       console.log('// call: timeout cleanup for', callId);
+      _sendClientCallLog('timeout', { callId });
     }, 30000);
+
+    // // comment: собираем getStats каждые 2 сек для debug, отправляем summary на сервер
+    const statsInterval = setInterval(async () => {
+      try {
+        if (!pc) return;
+        const s = await pc.getStats();
+        const result = [];
+        s.forEach(r => {
+          if (r.type && (r.type === 'outbound-rtp' || r.type === 'inbound-rtp' || r.type === 'candidate-pair' || r.type === 'remote-inbound-rtp')) {
+            result.push(r);
+          }
+        });
+        _sendClientCallLog('getStats', { callId, statsSample: result.slice(0, 10) }); // slice чтобы не шлать всё
+      } catch (e) {
+        // ignore
+      }
+    }, 2000);
+
     const savedInfo = activeCalls.get(callId) || {};
     savedInfo.timeoutId = toId;
+    savedInfo.statsIntervalId = statsInterval;
     activeCalls.set(callId, savedInfo);
 
   } catch (e) {
     console.error('// call: initiateCallTo error', e);
+    _sendClientCallLog('error', { where: 'initiateCallTo_top', err: String(e) });
     localToast('Не удалось начать звонок');
   }
 }
 
 // Принятие входящего звонка (вызывается при клике "Принять")
-async function acceptCall(from, callId) {
+export async function acceptCall(from, callId) {
+  // // comment: принять входящий звонок, логируем шаги
+  _sendClientCallLog('accept_start', { from, callId });
   try {
     const info = activeCalls.get(callId) || {};
-
-    // получаем iceServers от сервера (TURN/STUN) — тот же набор, что использовал инициатор
     const iceServers = await getIceServers();
+    _sendClientCallLog('ice_servers', { callId, iceServers });
+
     const pc = new RTCPeerConnection({ iceServers });
 
-    // Логи состояний для отладки
-    pc.oniceconnectionstatechange = () => console.log('// call: oniceconnectionstatechange', callId, pc.iceConnectionState);
-    pc.onconnectionstatechange = () => console.log('// call: onconnectionstatechange', callId, pc.connectionState);
-    pc.onicegatheringstatechange = () => console.log('// call: onicegatheringstatechange', callId, pc.iceGatheringState);
+    pc.oniceconnectionstatechange = () => {
+      console.log('// call: oniceconnectionstatechange', callId, pc.iceConnectionState);
+      _sendClientCallLog('iceconnectionstate', { callId, state: pc.iceConnectionState });
+    };
+    pc.onconnectionstatechange = () => {
+      console.log('// call: onconnectionstatechange', callId, pc.connectionState);
+      _sendClientCallLog('connectionstate', { callId, state: pc.connectionState });
+    };
+    pc.onicegatheringstatechange = () => {
+      console.log('// call: onicegatheringstatechange', callId, pc.iceGatheringState);
+      _sendClientCallLog('icegatheringstate', { callId, state: pc.iceGatheringState });
+    };
 
     let localStream;
     try {
       localStream = await acquireMic();
-      console.log('// call: acquired localStream, audio tracks:', localStream.getAudioTracks());
+      _sendClientCallLog('media_acquired', { callId, tracks: localStream.getAudioTracks().map(t => ({ id: t.id, enabled: t.enabled })) });
     } catch (e) {
       localToast('Нужен доступ к микрофону');
       console.warn('// call: getUserMedia failed', e);
+      _sendClientCallLog('error', { callId, reason: 'getUserMedia_failed', err: String(e) });
       try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'media_denied' }); } catch (e) { }
       cleanupCall(callId);
       return;
     }
 
-    // добавляем локальные треки
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-    console.log('// call: added local tracks to pc; pc.getSenders():', pc.getSenders());
+    _sendClientCallLog('tracks_added', { callId, senders: pc.getSenders().map(s => ({ id: s.track && s.track.id })) });
 
-    // ICE кандидаты — отправляем в JSON форме и логируем
     pc.onicecandidate = (ev) => {
       if (ev && ev.candidate) {
         try {
           const cand = ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate;
           console.log('// call: sending candidate', callId, cand);
+          _sendClientCallLog('local_candidate', { callId, candidate: cand });
           state.presenceClient.sendSignal(from, { type: 'call_candidate', callId, candidate: cand });
         } catch (err) {
           console.warn('// call: send candidate failed', err);
+          _sendClientCallLog('error', { callId, where: 'send_candidate', err: String(err) });
         }
       }
     };
 
-    // ontrack — воспроизводим remote stream и play()
     pc.ontrack = (ev) => {
       try {
         let audio = document.getElementById('call-audio-' + callId);
@@ -363,70 +490,64 @@ async function acceptCall(from, callId) {
         audio.volume = 1.0;
         const remoteStream = (ev.streams && ev.streams[0]) || ev.stream || null;
         audio.srcObject = remoteStream;
-        console.log('// call: ontrack set srcObject', callId, remoteStream);
-        audio.play().then(() => {
-          console.log('// call: audio.play OK', callId);
-        }).catch((err) => {
-          console.warn('// call: audio.play failed', callId, err);
-        });
+        _sendClientCallLog('ontrack', { callId, remoteStreamTracks: (remoteStream && remoteStream.getTracks().map(t => ({ id: t.id, kind: t.kind }))) });
+        audio.play().then(() => _sendClientCallLog('audio_play', { callId, ok: true })).catch(err => _sendClientCallLog('audio_play', { callId, ok: false, error: String(err) }));
       } catch (e) {
         console.error('// call: ontrack handler failed', callId, e);
+        _sendClientCallLog('error', { callId, where: 'ontrack', err: String(e) });
       }
     };
 
-    // set remote (offer) если есть
     if (!info.offerSdp) {
       console.warn('// call: no offerSdp for callId', callId, 'from', from);
+      _sendClientCallLog('error', { callId, reason: 'no_offer' });
       try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'no_offer' }); } catch (e) { }
       cleanupCall(callId);
       return;
     }
 
-    console.log('// call: setting remoteDescription (offer) for', callId);
+    _sendClientCallLog('setting_remote_offer', { callId });
     await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: info.offerSdp }));
 
-    // Если до создания pc приходили кандидаты — применим их
-    try {
-      if (info.pendingCandidates && info.pendingCandidates.length) {
-        console.log('// call: applying', info.pendingCandidates.length, 'pending candidates for', callId);
-        for (const cand of info.pendingCandidates) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(cand));
-            console.log('// call: applied pending candidate', callId, cand);
-          } catch (e) {
-            console.warn('// call: failed applying pending candidate', e, cand);
-          }
+    if (info.pendingCandidates && info.pendingCandidates.length) {
+      console.log('// call: applying', info.pendingCandidates.length, 'pending candidates for', callId);
+      _sendClientCallLog('applying_pending_candidates', { callId, count: info.pendingCandidates.length });
+      for (const cand of info.pendingCandidates) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(cand));
+          _sendClientCallLog('applied_candidate', { callId, candidate: cand });
+        } catch (e) {
+          console.warn('// call: failed applying pending candidate', e, cand);
+          _sendClientCallLog('error', { callId, where: 'apply_pending_candidate', err: String(e), candidate: cand });
         }
-        info.pendingCandidates = [];
       }
-    } catch (e) {
-      console.warn('// call: pendingCandidates apply step failed', e);
+      info.pendingCandidates = [];
     }
 
-    console.log('// call: remoteDescription set, creating answer', callId);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     console.log('// call: localDescription (answer) set, local SDP length:', (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0);
+    _sendClientCallLog('answer_created', { callId, sdpLen: (pc.localDescription && pc.localDescription.sdp && pc.localDescription.sdp.length) || 0 });
 
-    // отправляем answer
     try {
       state.presenceClient.sendSignal(from, { type: 'call_answer', callId, sdp: answer.sdp });
       console.log('// call: sent call_answer', callId);
+      _sendClientCallLog('answer_sent', { callId, to: from });
     } catch (e) {
       console.warn('// call: sendSignal call_answer failed', e);
+      _sendClientCallLog('error', { callId, where: 'send_answer', err: String(e) });
     }
 
-    // обновляем инфо в activeCalls
     info.pc = pc;
     info.localStream = localStream;
     info.role = 'callee';
     activeCalls.set(callId, info);
 
-    // убрать incoming UI
     if (info.uiIds && info.uiIds.incoming) removeUI(info.uiIds.incoming);
     localToast('Звонок принят');
   } catch (e) {
     console.error('// call: acceptCall failed', e);
+    _sendClientCallLog('error', { where: 'acceptCall_top', err: String(e) });
     localToast('Ошибка при принятии звонка');
     try { if (state.presenceClient) state.presenceClient.sendSignal(from, { type: 'call_end', callId, reason: 'answer_failed' }); } catch (er) { }
     cleanupCall(callId);
@@ -437,14 +558,15 @@ async function acceptCall(from, callId) {
 export async function handleCallSignal(from, payload) {
   try {
     console.log('[call][handle] incoming signal from=', from, 'payload=', payload);
+    _sendClientCallLog('handle_incoming', { from, payload });
     if (!payload || !payload.type) return;
     const type = payload.type;
     const callId = payload.callId;
     if (!callId) {
       console.warn('[call][handle] no callId in payload', payload);
+      _sendClientCallLog('error', { where: 'handle_no_callId', payload });
       return;
     }
-
     if (type === 'call_offer') {
       const existing = activeCalls.get(callId) || {};
       existing.offerSdp = payload.sdp;
@@ -452,17 +574,17 @@ export async function handleCallSignal(from, payload) {
       const uiId = showIncomingUI(from, callId);
       existing.uiIds = existing.uiIds || {};
       existing.uiIds.incoming = uiId;
-      // ensure pendingCandidates array exists (in case candidates arrive before accept)
       existing.pendingCandidates = existing.pendingCandidates || [];
       activeCalls.set(callId, existing);
       console.log('[call][handle] stored offer for', callId);
+      _sendClientCallLog('offer_received', { callId, from, sdpLen: payload.sdp && payload.sdp.length });
       return;
     }
-
     if (type === 'call_answer') {
       const info = activeCalls.get(callId);
       if (!info || !info.pc) {
         console.warn('[call][handle] call_answer for unknown call', callId);
+        _sendClientCallLog('error', { where: 'answer_unknown_call', callId });
         return;
       }
       try {
@@ -471,51 +593,43 @@ export async function handleCallSignal(from, payload) {
         localToast('Звонок подключён');
         if (info.timeoutId) { clearTimeout(info.timeoutId); info.timeoutId = null; activeCalls.set(callId, info); }
         console.log('[call][handle] setRemoteDescription(answer) OK for', callId);
+        _sendClientCallLog('answer_applied', { callId });
       } catch (e) {
         console.warn('[call][handle] setRemoteDescription(answer) failed', e);
+        _sendClientCallLog('error', { where: 'setRemoteDescription_answer', callId, err: String(e) });
       }
       return;
     }
-
     if (type === 'call_candidate') {
-
-      // защитимся: игнорируем пустые кандидаты
-      if (!payload || !payload.candidate) {
-        console.warn('// call: получен пустой candidate, игнорирую', callId);
-        return;
-      }
-
-      // buffer candidate if pc not created yet
       const info = activeCalls.get(callId) || {};
       if (!info.pc) {
-        // store candidate for later applying
         info.pendingCandidates = info.pendingCandidates || [];
-        // предотвращаем дублирование одного и того же кандидата
-        if (!info.pendingCandidates.find(c => String(c) === String(payload.candidate))) {
-          info.pendingCandidates.push(payload.candidate);
-        }
+        info.pendingCandidates.push(payload.candidate);
         activeCalls.set(callId, info);
-        console.log('// call: сохранён pending candidate для', callId);
+        console.log('[call][handle] saved pending candidate for', callId, payload.candidate);
+        _sendClientCallLog('pending_candidate_saved', { callId, candidate: payload.candidate });
         return;
       }
       try {
-        console.log('// call: добавляю candidate в pc для', callId);
+        console.log('[call][handle] adding candidate for', callId, payload.candidate);
         await info.pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        _sendClientCallLog('remote_candidate_added', { callId, candidate: payload.candidate });
       } catch (e) {
-        console.warn('// call: addIceCandidate не удался', e);
+        console.warn('[call][handle] addIceCandidate failed', e);
+        _sendClientCallLog('error', { where: 'addIceCandidate', callId, err: String(e) });
       }
       return;
     }
-
     if (type === 'call_end') {
       cleanupCall(callId);
       localToast(`Звонок завершён: ${payload.reason || ''}`);
       console.log('[call][handle] call_end for', callId, 'reason=', payload.reason);
+      _sendClientCallLog('call_end', { callId, reason: payload.reason });
       return;
     }
-
   } catch (e) {
     console.error('handleCallSignal error', e);
+    _sendClientCallLog('error', { where: 'handleCallSignal_top', err: String(e) });
   }
 }
 
